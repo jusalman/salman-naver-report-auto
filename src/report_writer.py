@@ -1,0 +1,295 @@
+import logging
+import argparse
+import os
+from dotenv import load_dotenv
+import datetime
+import pandas as pd
+from src.error_logger import ErrorLogger, append_download_log, append_error_log
+from src.google_sheet_client import GoogleSheetClient
+from src.report_parser import ParseResult
+
+# .env 로드
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+class ReportWriter:
+    def __init__(self):
+        self.sheet_client = GoogleSheetClient()
+
+    def _ensure_tab_exists(self, spreadsheet_id: str, tab_name: str):
+        info = self.sheet_client.get_sheet_info(spreadsheet_id)
+        if not info:
+            raise ValueError(f"Could not access spreadsheet {spreadsheet_id}")
+        
+        sheet_titles = [sheet['properties']['title'] for sheet in info.get('sheets', [])]
+        
+        if tab_name not in sheet_titles:
+            logger.info(f"Tab '{tab_name}' not found. Creating it.")
+            self.sheet_client.add_sheet(spreadsheet_id, tab_name)
+            return True
+        return False
+
+    def _ensure_headers(self, spreadsheet_id: str, tab_name: str, columns: list):
+        existing_data = self.sheet_client.get_sheet_data(spreadsheet_id, f"{tab_name}!A1:Z1")
+        if not existing_data or not existing_data[0]:
+            logger.info(f"Writing headers to '{tab_name}'")
+            self.sheet_client.update_sheet_data(spreadsheet_id, f"{tab_name}!A1", [columns])
+            return True
+        return False
+
+    def write_report(self, spreadsheet_id: str, tab_name: str, parse_result: ParseResult, dry_run: bool = True) -> dict:
+        """
+        파싱된 보고서 데이터를 구글 시트에 저장합니다.
+        dry_run=True인 경우 실제 저장은 수행하지 않고 로그만 출력합니다.
+        """
+        logger.info(f"Starting write process for tab '{tab_name}' (dry_run={dry_run})")
+        
+        if not parse_result.success or parse_result.dataframe is None or parse_result.dataframe.empty:
+            logger.warning("No valid data to write.")
+            return {"success": False, "rows_written": 0, "message": "No valid data"}
+
+        df = parse_result.dataframe
+        
+        # 1. 날짜 컬럼 확정 (중복 방지용)
+        target_date_col = None
+        if len(parse_result.date_column_candidates) == 1:
+            target_date_col = parse_result.date_column_candidates[0]
+        elif len(parse_result.date_column_candidates) > 1:
+            return {"success": False, "rows_written": 0, "message": f"Multiple date column candidates found: {parse_result.date_column_candidates}. Cannot perform safe deduplication."}
+        else:
+            return {"success": False, "rows_written": 0, "message": "No date column detected. Cannot perform safe deduplication."}
+
+        if target_date_col not in df.columns:
+            return {"success": False, "rows_written": 0, "message": f"Date column '{target_date_col}' not found in data."}
+
+        # 새 데이터의 고유 날짜들 추출
+        new_dates = df[target_date_col].astype(str).unique().tolist()
+        logger.info(f"Data contains dates: {new_dates}")
+
+        # Dry Run 모드
+        if dry_run:
+            logger.info(f"[DRY-RUN] Target Spreadsheet ID: {spreadsheet_id}")
+            logger.info(f"[DRY-RUN] Target Tab: {tab_name}")
+            logger.info(f"[DRY-RUN] Date Column to use for deduplication: {target_date_col}")
+            logger.info(f"[DRY-RUN] Rows to write: {len(df)}")
+            logger.info("[DRY-RUN] 실제 실행 시, 위 날짜의 기존 데이터는 삭제되고 새 데이터가 저장됩니다.")
+            return {"success": True, "rows_written": len(df), "message": "Dry run successful", "dry_run": True}
+
+        # 실제 쓰기
+        try:
+            self._ensure_tab_exists(spreadsheet_id, tab_name)
+            self._ensure_headers(spreadsheet_id, tab_name, list(df.columns))
+
+            # 2. 중복 방지 (기존 데이터 읽기 -> 해당 날짜 제외 -> 새 데이터 추가 -> 전체 덮어쓰기)
+            existing_data = self.sheet_client.get_sheet_data(spreadsheet_id, f"{tab_name}!A:Z")
+            
+            if existing_data and len(existing_data) > 1:
+                headers = existing_data[0]
+                if target_date_col in headers:
+                    date_idx = headers.index(target_date_col)
+                    
+                    filtered_data = [headers]
+                    # 새 데이터에 포함된 날짜가 아닌 기존 데이터만 유지
+                    for row in existing_data[1:]:
+                        row_date = str(row[date_idx]) if date_idx < len(row) else ""
+                        if row_date not in new_dates:
+                            filtered_data.append(row)
+                    
+                    # 새 데이터 추가 (NaN 처리 포함)
+                    new_data_list = df.fillna("").astype(str).values.tolist()
+                    filtered_data.extend(new_data_list)
+                    
+                    # 덮어쓰기
+                    logger.info("Overwriting sheet with deduplicated data...")
+                    self.sheet_client.clear_sheet_data(spreadsheet_id, f"{tab_name}!A:Z")
+                    self.sheet_client.update_sheet_data(spreadsheet_id, f"{tab_name}!A1", filtered_data)
+                    rows_written = len(new_data_list)
+                else:
+                    # 헤더에 날짜 컬럼이 없으면 안전을 위해 에러 처리
+                    return {"success": False, "rows_written": 0, "message": f"Date column '{target_date_col}' not found in existing sheet headers."}
+            else:
+                # 시트가 비어있거나 헤더만 있는 경우 단순 추가
+                new_data_list = df.fillna("").astype(str).values.tolist()
+                self.sheet_client.append_sheet_data(spreadsheet_id, f"{tab_name}!A1", new_data_list)
+                rows_written = len(new_data_list)
+
+            logger.info(f"Successfully wrote {rows_written} rows to '{tab_name}'")
+            return {"success": True, "rows_written": rows_written, "message": "Success", "dry_run": False}
+
+        except Exception as e:
+            logger.error(f"Error writing report: {e}")
+            return {"success": False, "rows_written": 0, "message": str(e), "dry_run": False}
+
+    def resolve_destination_from_config(self, account_name: str, report_name: str) -> dict:
+        """
+        허브 시트의 CONFIG_ACCOUNTS, CONFIG_REPORTS 설정을 조회하여
+        고객사의 저장 대상 정보를 반환합니다.
+        """
+        hub_id = os.getenv("HUB_SPREADSHEET_ID")
+        if not hub_id:
+            raise ValueError("HUB_SPREADSHEET_ID is not set in .env")
+
+        # 1. CONFIG_ACCOUNTS 조회
+        accounts_data = self.sheet_client.get_sheet_data(hub_id, "CONFIG_ACCOUNTS!A:Z")
+        if not accounts_data or len(accounts_data) < 2:
+            raise ValueError("CONFIG_ACCOUNTS tab is empty or missing headers")
+        
+        acc_df = pd.DataFrame(accounts_data[1:], columns=accounts_data[0])
+        account_row = acc_df[acc_df['고객사명'] == account_name]
+        
+        if account_row.empty:
+            raise ValueError(f"Customer '{account_name}' not found in CONFIG_ACCOUNTS")
+        
+        account_info = account_row.iloc[0]
+
+        # 2. CONFIG_REPORTS 조회
+        reports_data = self.sheet_client.get_sheet_data(hub_id, "CONFIG_REPORTS!A:Z")
+        if not reports_data or len(reports_data) < 2:
+            raise ValueError("CONFIG_REPORTS tab is empty or missing headers")
+        
+        rep_df = pd.DataFrame(reports_data[1:], columns=reports_data[0])
+        # 네이버보고서명 또는 저장탭명으로 검색
+        report_row = rep_df[(rep_df['네이버보고서명'] == report_name) | (rep_df['저장탭명'] == report_name)]
+        
+        if report_row.empty:
+            raise ValueError(f"Report '{report_name}' not found in CONFIG_REPORTS")
+        
+        report_info = report_row.iloc[0]
+
+        return {
+            "customer_name": account_name,
+            "naver_account_name": account_info.get("네이버광고계정명", ""),
+            "naver_account_id": account_info.get("네이버광고계정ID", ""),
+            "target_spreadsheet_id": account_info.get("저장구글시트ID", ""),
+            "target_tab_name": report_info.get("저장탭명", ""),
+            "report_name": report_info.get("네이버보고서명", "")
+        }
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+    from src.report_parser import parse_file
+    
+    parser = argparse.ArgumentParser(description="Naver Report Writer")
+    parser.add_argument("--dry-run", action="store_true", default=True, help="Dry run mode (default)")
+    parser.add_argument("--write", action="store_false", dest="dry_run", help="Actual write mode")
+    parser.add_argument("--resolve-only", action="store_true", help="Only resolve destination from config and exit")
+    parser.add_argument("--account-name", type=str, default="페이퍼백", help="Target account name")
+    parser.add_argument("--report-name", type=str, default="데일리_살만", help="Target report name")
+    args = parser.parse_args()
+
+    writer = ReportWriter()
+
+    # --resolve-only 모드
+    if args.resolve_only:
+        try:
+            dest = writer.resolve_destination_from_config(args.account_name, args.report_name)
+            masked_id = f"{dest['target_spreadsheet_id'][:4]}...{dest['target_spreadsheet_id'][-4:]}" if len(dest['target_spreadsheet_id']) > 8 else "****"
+            
+            print("\n" + "="*50)
+            print(" [ 설정 조회 결과 ]")
+            print(f" - 고객사명: {dest['customer_name']}")
+            print(f" - 네이버광고계정명: {dest['naver_account_name']}")
+            print(f" - 네이버광고계정ID: {dest['naver_account_id']}")
+            print(f" - 저장구글시트ID: {masked_id}")
+            print(f" - 저장탭명: {dest['target_tab_name']}")
+            print("="*50 + "\n")
+        except Exception as e:
+            print(f"Error: {e}")
+        exit(0)
+
+    sample_file = "downloads/samples/paperbag100/paperbag100.csv"
+    
+    if os.path.exists(sample_file):
+        parse_res = parse_file(sample_file)
+        if parse_res.success:
+            try:
+                # 1. 설정 정보 조회 (고객사명, 보고서명 기반)
+                dest = writer.resolve_destination_from_config(args.account_name, args.report_name)
+                spreadsheet_id = dest["target_spreadsheet_id"]
+                tab_name = dest["target_tab_name"]
+            except Exception as e:
+                # Resolve failed (e.g., customer not found, report not found)
+                err_msg = str(e)
+                # Determine error type
+                if "Customer" in err_msg and "CONFIG_ACCOUNTS" in err_msg:
+                    error_type = "CONFIG_ACCOUNT_NOT_FOUND"
+                elif "Report" in err_msg and "CONFIG_REPORTS" in err_msg:
+                    error_type = "CONFIG_REPORT_NOT_FOUND"
+                else:
+                    error_type = "UNKNOWN_ERROR"
+                # Log to ERROR_LOG
+                el_err = ErrorLogger()
+                run_id = el_err.generate_run_id()
+                error_row = {
+                    "run_id": run_id,
+                    "단계": "CONFIG_RESOLVE",
+                    "고객사명": args.account_name,
+                    "네이버광고계정ID": "",
+                    "보고서구분": args.report_name,
+                    "오류유형": error_type,
+                    "오류내용": err_msg,
+                    "조치필요여부": "TRUE",
+                    "담당자확인": ""
+                }
+                append_error_log(error_row)
+                print(f"Error: {err_msg}")
+                exit(1)
+                
+                # (the rest of the logic follows after successful resolve)
+
+                # 2. 실행 정보 요약 출력
+                mode_str = "DRY-RUN" if args.dry_run else "ACTUAL WRITE"
+                masked_id = f"{spreadsheet_id[:4]}...{spreadsheet_id[-4:]}" if len(spreadsheet_id) > 8 else "****"
+                
+                print("\n" + "="*50)
+                print(f" [ 저장 실행 정보 요약 ({mode_str}) ]")
+                print(f" - 고객사명: {dest['customer_name']}")
+                print(f" - 네이버광고계정명: {dest['naver_account_name']}")
+                print(f" - 네이버광고계정ID: {dest['naver_account_id']}")
+                print(f" - 저장구글시트ID: {masked_id}")
+                print(f" - 저장탭명: {tab_name}")
+                print(f" - 파일명: {os.path.basename(sample_file)}")
+                print(f" - 저장 예정 행 수: {len(parse_res.dataframe)}")
+                print(f" - dry-run 여부: {args.dry_run}")
+                print("="*50 + "\n")
+                
+                # 3. 저장 실행
+                res = writer.write_report(
+                    spreadsheet_id=spreadsheet_id, 
+                    tab_name=tab_name, 
+                    parse_result=parse_res,
+                    dry_run=args.dry_run
+                )
+                
+
+                # After successful write, log to DOWNLOAD_LOG if not dry-run
+                if not args.dry_run and res.get('success'):
+                    # Build log row dict
+                    el = ErrorLogger()
+                    run_id = el.generate_run_id()
+                    now_str = datetime.datetime.now(el.seoul_tz).strftime("%Y-%m-%d %H:%M:%S")
+                    log_data = {
+                        "run_id": run_id,
+                        "고객사명": dest.get('customer_name', ''),
+                        "네이버광고계정명": dest.get('naver_account_name', ''),
+                        "네이버광고계정ID": dest.get('naver_account_id', ''),
+                        "보고서구분": dest.get('report_name', ''),
+                        "네이버보고서명": dest.get('report_name', ''),
+                        "저장탭명": dest.get('target_tab_name', ''),
+                        "통계기간": "",
+                        "다운로드파일명": os.path.basename(sample_file),
+                        "저장행수": res.get('rows_written', 0),
+                        "결과": "성공",
+                        "오류내용": ""
+                    }
+                    append_download_log(log_data)
+
+                
+            except Exception as e:
+                print(f"Error: {e}")
+                exit(1)
+        else:
+            print("파싱 실패:", parse_res.error_message)
+    else:
+        print(f"샘플 파일이 없습니다: {sample_file}")

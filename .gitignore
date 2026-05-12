@@ -1,0 +1,13 @@
+credentials/
+token/
+.env
+browser_profile/
+downloads/runtime/
+logs/
+*.json
+*.xlsx
+*.csv
+*.zip
+__pycache__/
+*.pyc
+.pytest_cache/
