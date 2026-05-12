@@ -169,6 +169,7 @@ class ReportWriter:
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     from src.report_parser import parse_file
+    import sys
     
     parser = argparse.ArgumentParser(description="Naver Report Writer")
     parser.add_argument("--dry-run", action="store_true", default=True, help="Dry run mode (default)")
@@ -176,6 +177,7 @@ if __name__ == '__main__':
     parser.add_argument("--resolve-only", action="store_true", help="Only resolve destination from config and exit")
     parser.add_argument("--account-name", type=str, default="페이퍼백", help="Target account name")
     parser.add_argument("--report-name", type=str, default="데일리_살만", help="Target report name")
+    parser.add_argument("--file-path", type=str, help="Path to the CSV file to parse")
     args = parser.parse_args()
 
     writer = ReportWriter()
@@ -194,102 +196,100 @@ if __name__ == '__main__':
             print(f" - 저장구글시트ID: {masked_id}")
             print(f" - 저장탭명: {dest['target_tab_name']}")
             print("="*50 + "\n")
+            sys.exit(0)
         except Exception as e:
             print(f"Error: {e}")
-        exit(0)
+            sys.exit(1)
 
-    sample_file = "downloads/samples/paperbag100/paperbag100.csv"
+    # 파일 경로 결정
+    file_to_process = args.file_path if args.file_path else "downloads/samples/paperbag100/paperbag100.csv"
     
-    if os.path.exists(sample_file):
-        parse_res = parse_file(sample_file)
-        if parse_res.success:
-            try:
-                # 1. 설정 정보 조회 (고객사명, 보고서명 기반)
-                dest = writer.resolve_destination_from_config(args.account_name, args.report_name)
-                spreadsheet_id = dest["target_spreadsheet_id"]
-                tab_name = dest["target_tab_name"]
-            except Exception as e:
-                # Resolve failed (e.g., customer not found, report not found)
-                err_msg = str(e)
-                # Determine error type
-                if "Customer" in err_msg and "CONFIG_ACCOUNTS" in err_msg:
-                    error_type = "CONFIG_ACCOUNT_NOT_FOUND"
-                elif "Report" in err_msg and "CONFIG_REPORTS" in err_msg:
-                    error_type = "CONFIG_REPORT_NOT_FOUND"
-                else:
-                    error_type = "UNKNOWN_ERROR"
-                # Log to ERROR_LOG
-                el_err = ErrorLogger()
-                run_id = el_err.generate_run_id()
-                error_row = {
-                    "run_id": run_id,
-                    "단계": "CONFIG_RESOLVE",
-                    "고객사명": args.account_name,
-                    "네이버광고계정ID": "",
-                    "보고서구분": args.report_name,
-                    "오류유형": error_type,
-                    "오류내용": err_msg,
-                    "조치필요여부": "TRUE",
-                    "담당자확인": ""
-                }
-                append_error_log(error_row)
-                print(f"Error: {err_msg}")
-                exit(1)
-                
-                # (the rest of the logic follows after successful resolve)
+    if not os.path.exists(file_to_process):
+        print(f"파일을 찾을 수 없습니다: {file_to_process}")
+        sys.exit(1)
 
-                # 2. 실행 정보 요약 출력
-                mode_str = "DRY-RUN" if args.dry_run else "ACTUAL WRITE"
-                masked_id = f"{spreadsheet_id[:4]}...{spreadsheet_id[-4:]}" if len(spreadsheet_id) > 8 else "****"
-                
-                print("\n" + "="*50)
-                print(f" [ 저장 실행 정보 요약 ({mode_str}) ]")
-                print(f" - 고객사명: {dest['customer_name']}")
-                print(f" - 네이버광고계정명: {dest['naver_account_name']}")
-                print(f" - 네이버광고계정ID: {dest['naver_account_id']}")
-                print(f" - 저장구글시트ID: {masked_id}")
-                print(f" - 저장탭명: {tab_name}")
-                print(f" - 파일명: {os.path.basename(sample_file)}")
-                print(f" - 저장 예정 행 수: {len(parse_res.dataframe)}")
-                print(f" - dry-run 여부: {args.dry_run}")
-                print("="*50 + "\n")
-                
-                # 3. 저장 실행
-                res = writer.write_report(
-                    spreadsheet_id=spreadsheet_id, 
-                    tab_name=tab_name, 
-                    parse_result=parse_res,
-                    dry_run=args.dry_run
-                )
-                
+    parse_res = parse_file(file_to_process)
+    if not parse_res.success:
+        print(f"파싱 실패: {parse_res.error_message}")
+        sys.exit(1)
 
-                # After successful write, log to DOWNLOAD_LOG if not dry-run
-                if not args.dry_run and res.get('success'):
-                    # Build log row dict
-                    el = ErrorLogger()
-                    run_id = el.generate_run_id()
-                    now_str = datetime.datetime.now(el.seoul_tz).strftime("%Y-%m-%d %H:%M:%S")
-                    log_data = {
-                        "run_id": run_id,
-                        "고객사명": dest.get('customer_name', ''),
-                        "네이버광고계정명": dest.get('naver_account_name', ''),
-                        "네이버광고계정ID": dest.get('naver_account_id', ''),
-                        "보고서구분": dest.get('report_name', ''),
-                        "네이버보고서명": dest.get('report_name', ''),
-                        "저장탭명": dest.get('target_tab_name', ''),
-                        "통계기간": "",
-                        "다운로드파일명": os.path.basename(sample_file),
-                        "저장행수": res.get('rows_written', 0),
-                        "결과": "성공",
-                        "오류내용": ""
-                    }
-                    append_download_log(log_data)
+    try:
+        # 1. 설정 정보 조회
+        try:
+            dest = writer.resolve_destination_from_config(args.account_name, args.report_name)
+            spreadsheet_id = dest["target_spreadsheet_id"]
+            tab_name = dest["target_tab_name"]
+        except Exception as e:
+            # Resolve failed (e.g., customer not found, report not found)
+            err_msg = str(e)
+            if "Customer" in err_msg and "CONFIG_ACCOUNTS" in err_msg:
+                error_type = "CONFIG_ACCOUNT_NOT_FOUND"
+            elif "Report" in err_msg and "CONFIG_REPORTS" in err_msg:
+                error_type = "CONFIG_REPORT_NOT_FOUND"
+            else:
+                error_type = "UNKNOWN_ERROR"
+            
+            el_err = ErrorLogger()
+            run_id = el_err.generate_run_id()
+            error_row = {
+                "run_id": run_id,
+                "단계": "CONFIG_RESOLVE",
+                "고객사명": args.account_name,
+                "네이버광고계정ID": "",
+                "보고서구분": args.report_name,
+                "오류유형": error_type,
+                "오류내용": err_msg,
+                "조치필요여부": "TRUE",
+                "담당자확인": ""
+            }
+            append_error_log(error_row)
+            print(f"Error: {err_msg}")
+            sys.exit(1)
 
-                
-            except Exception as e:
-                print(f"Error: {e}")
-                exit(1)
-        else:
-            print("파싱 실패:", parse_res.error_message)
-    else:
-        print(f"샘플 파일이 없습니다: {sample_file}")
+        # 2. 실행 정보 요약 출력
+        mode_str = "DRY-RUN" if args.dry_run else "ACTUAL WRITE"
+        masked_id = f"{spreadsheet_id[:4]}...{spreadsheet_id[-4:]}" if len(spreadsheet_id) > 8 else "****"
+        
+        print("\n" + "="*50)
+        print(f" [ 저장 실행 정보 요약 ({mode_str}) ]")
+        print(f" - 고객사명: {dest['customer_name']}")
+        print(f" - 네이버광고계정명: {dest['naver_account_name']}")
+        print(f" - 네이버광고계정ID: {dest['naver_account_id']}")
+        print(f" - 저장구글시트ID: {masked_id}")
+        print(f" - 저장탭명: {tab_name}")
+        print(f" - 파일명: {os.path.basename(file_to_process)}")
+        print(f" - 저장 예정 행 수: {len(parse_res.dataframe)}")
+        print(f" - dry-run 여부: {args.dry_run}")
+        print("="*50 + "\n")
+        
+        # 3. 저장 실행
+        res = writer.write_report(
+            spreadsheet_id=spreadsheet_id, 
+            tab_name=tab_name, 
+            parse_result=parse_res,
+            dry_run=args.dry_run
+        )
+
+        # 4. DOWNLOAD_LOG 기록
+        if not args.dry_run and res.get('success'):
+            el = ErrorLogger()
+            run_id = el.generate_run_id()
+            log_data = {
+                "run_id": run_id,
+                "고객사명": dest.get('customer_name', ''),
+                "네이버광고계정명": dest.get('naver_account_name', ''),
+                "네이버광고계정ID": dest.get('naver_account_id', ''),
+                "보고서구분": dest.get('report_name', ''),
+                "네이버보고서명": dest.get('report_name', ''),
+                "저장탭명": dest.get('target_tab_name', ''),
+                "통계기간": "",
+                "다운로드파일명": os.path.basename(file_to_process),
+                "저장행수": res.get('rows_written', 0),
+                "결과": "성공",
+                "오류내용": ""
+            }
+            append_download_log(log_data)
+            
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
