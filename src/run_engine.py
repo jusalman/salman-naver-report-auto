@@ -3,16 +3,28 @@ import sys
 import subprocess
 import os
 from src.naver_report_downloader import download_report
+from src.config_loader import ConfigLoader
 
-def process_report(account_name, account_id, report_name, is_actual_write):
+def process_report(account_name, account_id, report_info, is_actual_write):
     """단일 보고서에 대해 다운로드 및 구글시트 저장을 수행합니다."""
+    if isinstance(report_info, str):
+        report_name = report_info
+        tab_name = "N/A"
+        period = "N/A"
+    else:
+        report_name = report_info.get("네이버보고서명", "")
+        tab_name = report_info.get("저장탭명", "N/A")
+        period = report_info.get("통계기간", "N/A")
+
     writer_mode = "--write" if is_actual_write else "--dry-run"
     print(f"\n" + "="*60)
-    print(f"[*] 보고서 처리 시작: {report_name}")
+    print(f"[*] 보고서 처리 시작: {report_name} (탭: {tab_name})")
     print("="*60)
 
     result = {
         "report_name": report_name,
+        "tab_name": tab_name,
+        "period": period,
         "success": False,
         "download_path": None,
         "write_status": "PENDING",
@@ -46,8 +58,10 @@ def process_report(account_name, account_id, report_name, is_actual_write):
 
     print(f"[*] 데이터 저장 단계 진입 ({writer_mode})...")
     try:
+        # check=False로 설정하여 내부 에러 메시지를 직접 처리
         proc_result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         
+        # subprocess 출력 연결
         if proc_result.stdout:
             print(proc_result.stdout)
         if proc_result.stderr:
@@ -91,8 +105,21 @@ def main():
     # 대상 보고서 목록 설정
     reports_to_run = []
     if args.all_reports:
-        reports_to_run = ["데일리전환_살만", "데일리_살만", "위클리키워드_살만"]
+        loader = ConfigLoader()
+        df_reports = loader.load_config_reports()
+        if df_reports.empty:
+            print("\n[⚠️] NO_ACTIVE_REPORTS_FOUND: CONFIG_REPORTS 설정을 불러올 수 없거나 비어있습니다.")
+            sys.exit(1)
+        
+        # 실행여부가 TRUE인 행만 필터링
+        active_reports = df_reports[df_reports['실행여부'] == 'TRUE']
+        if active_reports.empty:
+            print("\n[⚠️] NO_ACTIVE_REPORTS_FOUND: 실행여부가 TRUE인 보고서가 없습니다.")
+            sys.exit(1)
+            
+        reports_to_run = active_reports.to_dict('records')
     else:
+        # 단일 보고서 모드 (기존 호환성 유지)
         reports_to_run = [args.report_name]
 
     print(f"\n[*] SalMan 실행 엔진 시작: {args.account_name} ({args.account_id})")
@@ -100,8 +127,8 @@ def main():
     print(f"[*] 실행 모드: {'실제 저장 (WRITE)' if is_actual_write else '검증 전용 (DRY-RUN)'}")
     
     results = []
-    for report_name in reports_to_run:
-        res = process_report(args.account_name, args.account_id, report_name, is_actual_write)
+    for r_info in reports_to_run:
+        res = process_report(args.account_name, args.account_id, r_info, is_actual_write)
         results.append(res)
 
     # 전체 요약 출력
@@ -119,7 +146,9 @@ def main():
     
     for r in results:
         status_icon = "✅" if r["success"] else "❌"
-        print(f"{status_icon} 보고서명: {r['report_name']}")
+        print(f"{status_icon} 네이버보고서명: {r['report_name']}")
+        print(f"    - 저장탭명: {r.get('tab_name', 'N/A')}")
+        print(f"    - 통계기간: {r.get('period', 'N/A')}")
         if r["download_path"]:
             print(f"    - 다운로드: {r['download_path']}")
         else:
