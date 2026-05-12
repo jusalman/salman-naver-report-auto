@@ -96,7 +96,10 @@ def update_hub_status(all_execution_results, skipped_or_invalid_accounts, is_act
         last_path = ""
         for r in reversed(results):
             if r["success"] and r["download_path"]:
-                last_path = r["download_path"]
+                if r.get("is_deleted"):
+                    last_path = f"자동삭제됨: {os.path.basename(r['download_path'])}"
+                else:
+                    last_path = r["download_path"]
                 break
                 
         errors = [f"{r['report_name']}: {r['error_code']} - {r['error_message']}" for r in results if not r["success"]]
@@ -136,7 +139,7 @@ def update_hub_status(all_execution_results, skipped_or_invalid_accounts, is_act
         sheet_client.update_sheet_data(hub_id, f"CONFIG_ACCOUNTS!{get_column_letter(col_map['마지막실행결과']+1)}{row_num}", [[res_status]])
         sheet_client.update_sheet_data(hub_id, f"CONFIG_ACCOUNTS!{get_column_letter(col_map['오류내용']+1)}{row_num}", [[error_content]])
 
-def process_report(account_name, account_id, report_info, is_actual_write):
+def process_report(account_name, account_id, report_info, is_actual_write, keep_files=False):
     """단일 보고서에 대해 다운로드 및 구글시트 저장을 수행합니다."""
     if isinstance(report_info, str):
         report_name = report_info
@@ -158,6 +161,7 @@ def process_report(account_name, account_id, report_info, is_actual_write):
         "period": period,
         "success": False,
         "download_path": None,
+        "is_deleted": False,
         "write_status": "PENDING",
         "error_code": "",
         "error_message": ""
@@ -219,9 +223,19 @@ def process_report(account_name, account_id, report_info, is_actual_write):
     result["write_status"] = "ACTUAL_WRITE_SUCCESS" if is_actual_write else "DRY_RUN_SUCCESS"
     print(f"\n[✅] '{report_name}' 처리 성공")
     
+    # 3. 파일 정리 (Cleanup)
+    if not keep_files:
+        try:
+            if os.path.exists(csv_path):
+                os.remove(csv_path)
+                result["is_deleted"] = True
+                print(f"[CLEANUP] 다운로드 CSV 삭제 완료: {os.path.basename(csv_path)}")
+        except Exception as e:
+            print(f"[CLEANUP_WARNING] 파일 삭제 실패: {csv_path} (사유: {e})")
+    
     return result
 
-def process_account_reports(account_name, account_id, active_reports, is_actual_write):
+def process_account_reports(account_name, account_id, active_reports, is_actual_write, keep_files=False):
     """특정 고객사의 모든 활성 보고서를 순차적으로 실행합니다."""
     print(f"\n" + "#"*60)
     print(f"### 고객사 실행 시작: {account_name} ({account_id}) ###")
@@ -229,7 +243,7 @@ def process_account_reports(account_name, account_id, active_reports, is_actual_
     
     account_results = []
     for r_info in active_reports:
-        res = process_report(account_name, account_id, r_info, is_actual_write)
+        res = process_report(account_name, account_id, r_info, is_actual_write, keep_files=keep_files)
         account_results.append(res)
     
     return account_results
@@ -243,6 +257,7 @@ def main():
     parser.add_argument("--all-accounts", action="store_true", help="Run all active accounts and their active reports")
     parser.add_argument("--dry-run", action="store_true", help="Dry run mode (validate only)")
     parser.add_argument("--write", action="store_true", help="Actual write mode")
+    parser.add_argument("--keep-files", action="store_true", help="Keep downloaded CSV files after processing")
 
     args = parser.parse_args()
 
@@ -255,6 +270,7 @@ def main():
 
     # 모드 결정 (기본값 dry-run)
     is_actual_write = args.write
+    keep_files = args.keep_files
     loader = ConfigLoader()
     
     # 보고서 설정 로드
@@ -295,19 +311,20 @@ def main():
                 account_info["고객사명"], 
                 account_info["네이버광고계정ID"], 
                 active_reports, 
-                is_actual_write
+                is_actual_write,
+                keep_files=keep_files
             )
             all_execution_results.append((account_info, report_results))
             
     elif args.all_reports:
         account_info = {"고객사명": args.account_name, "네이버광고계정ID": args.account_id}
-        report_results = process_account_reports(args.account_name, args.account_id, active_reports, is_actual_write)
+        report_results = process_account_reports(args.account_name, args.account_id, active_reports, is_actual_write, keep_files=keep_files)
         all_execution_results.append((account_info, report_results))
         
     else:
         # 단일 보고서 모드
         account_info = {"고객사명": args.account_name, "네이버광고계정ID": args.account_id}
-        res = process_report(args.account_name, args.account_id, args.report_name, is_actual_write)
+        res = process_report(args.account_name, args.account_id, args.report_name, is_actual_write, keep_files=keep_files)
         all_execution_results.append((account_info, [res]))
 
     # --- 전체 요약 출력 ---
