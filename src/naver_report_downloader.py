@@ -209,9 +209,10 @@ def run_open_report(account_id, report_name):
             print("[*] 브라우저를 닫습니다...")
             browser.close()
 
-def run_download_report(account_id, report_name):
+def download_report(account_id, report_name, headless=False):
     """
     보고서를 찾아 클릭한 후, 다운로드 버튼을 눌러 실제 파일을 다운로드하는 함수.
+    성공 시 저장된 파일의 절대 경로를 반환합니다.
     """
     from datetime import datetime
     profile_dir = os.getenv("BROWSER_PROFILE_DIR", "browser_profile")
@@ -220,10 +221,12 @@ def run_download_report(account_id, report_name):
     print(f"[*] 브라우저 프로필 디렉토리: {profile_dir}")
     print(f"[*] 대상 보고서 URL: {target_url}")
     
+    save_path = None
+    
     with sync_playwright() as p:
         browser = p.chromium.launch_persistent_context(
             user_data_dir=profile_dir,
-            headless=False,
+            headless=headless,
             viewport={"width": 1280, "height": 800},
             accept_downloads=True
         )
@@ -237,11 +240,11 @@ def run_download_report(account_id, report_name):
             
             if "nid.naver.com" in page.url or "login" in page.url.lower():
                 print("NAVER_LOGIN_REQUIRED")
-                return
+                return None
             
             if account_id not in page.url:
                 print("NAVER_ACCOUNT_ACCESS_ERROR")
-                return
+                return None
                 
             print(f"[*] '{report_name}' 보고서를 찾습니다...")
             
@@ -282,7 +285,7 @@ def run_download_report(account_id, report_name):
                                 
             if not target_element:
                 print(f"❌ '{report_name}' 보고서를 화면에서 찾을 수 없습니다.")
-                return
+                return None
                 
             print(f"[*] '{report_name}' 보고서를 클릭합니다...")
             target_element.click()
@@ -315,7 +318,7 @@ def run_download_report(account_id, report_name):
                             
             if not download_btn:
                 print("❌ '다운로드' 버튼을 찾을 수 없습니다.")
-                return
+                return None
                 
             print("[*] 다운로드 버튼 클릭 및 파일 저장을 대기합니다...")
             
@@ -324,7 +327,7 @@ def run_download_report(account_id, report_name):
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{account_id}_{report_name}_{timestamp}.csv"
-            save_path = os.path.join(download_dir, filename)
+            save_path = os.path.abspath(os.path.join(download_dir, filename))
             
             try:
                 with page.expect_download(timeout=60000) as download_info:
@@ -341,13 +344,23 @@ def run_download_report(account_id, report_name):
                 
             except Exception as e:
                 print(f"\n❌ 다운로드 실패: {str(e)}\n")
+                return None
             
         except Exception as e:
             print(f"오류 발생: {str(e)}")
+            return None
             
         finally:
             print("[*] 브라우저를 닫습니다...")
             browser.close()
+            
+    return save_path
+
+def run_download_report(account_id, report_name):
+    """
+    기존 CLI 호환성을 위한 래퍼 함수
+    """
+    return download_report(account_id, report_name, headless=False)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Naver Ads Report Downloader")
