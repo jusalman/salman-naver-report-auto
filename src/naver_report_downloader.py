@@ -209,13 +209,154 @@ def run_open_report(account_id, report_name):
             print("[*] 브라우저를 닫습니다...")
             browser.close()
 
+def run_download_report(account_id, report_name):
+    """
+    보고서를 찾아 클릭한 후, 다운로드 버튼을 눌러 실제 파일을 다운로드하는 함수.
+    """
+    from datetime import datetime
+    profile_dir = os.getenv("BROWSER_PROFILE_DIR", "browser_profile")
+    target_url = f"https://ads.naver.com/manage/ad-accounts/{account_id}/sa/reports"
+    
+    print(f"[*] 브라우저 프로필 디렉토리: {profile_dir}")
+    print(f"[*] 대상 보고서 URL: {target_url}")
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
+            headless=False,
+            viewport={"width": 1280, "height": 800},
+            accept_downloads=True
+        )
+        
+        page = browser.pages[0] if browser.pages else browser.new_page()
+        
+        print("[*] 보고서 페이지로 이동합니다...")
+        try:
+            page.goto(target_url, wait_until="networkidle")
+            page.wait_for_timeout(3000) # JS 렌더링 대기
+            
+            if "nid.naver.com" in page.url or "login" in page.url.lower():
+                print("NAVER_LOGIN_REQUIRED")
+                return
+            
+            if account_id not in page.url:
+                print("NAVER_ACCOUNT_ACCESS_ERROR")
+                return
+                
+            print(f"[*] '{report_name}' 보고서를 찾습니다...")
+            
+            target_element = None
+            
+            # 메인 페이지에서 검색
+            loc_exact = page.get_by_text(report_name, exact=True)
+            if loc_exact.count() > 0:
+                target_element = loc_exact.first
+            else:
+                loc_sub = page.get_by_text(report_name, exact=False)
+                if loc_sub.count() > 0:
+                    for i in range(loc_sub.count()):
+                        if loc_sub.nth(i).text_content() and loc_sub.nth(i).text_content().strip() == report_name:
+                            target_element = loc_sub.nth(i)
+                            break
+                    if not target_element:
+                        target_element = loc_sub.first
+            
+            # iframe에서 검색
+            if not target_element:
+                for frame in page.frames:
+                    loc_exact = frame.get_by_text(report_name, exact=True)
+                    if loc_exact.count() > 0:
+                        target_element = loc_exact.first
+                        break
+                    else:
+                        loc_sub = frame.get_by_text(report_name, exact=False)
+                        if loc_sub.count() > 0:
+                            for i in range(loc_sub.count()):
+                                if loc_sub.nth(i).text_content() and loc_sub.nth(i).text_content().strip() == report_name:
+                                    target_element = loc_sub.nth(i)
+                                    break
+                            if not target_element:
+                                target_element = loc_sub.first
+                            if target_element:
+                                break
+                                
+            if not target_element:
+                print(f"❌ '{report_name}' 보고서를 화면에서 찾을 수 없습니다.")
+                return
+                
+            print(f"[*] '{report_name}' 보고서를 클릭합니다...")
+            target_element.click()
+            
+            print("[*] 상세 화면 진입 대기 중...")
+            page.wait_for_timeout(3000) # 로딩 대기
+            
+            print("[*] '다운로드' 버튼을 찾습니다...")
+            download_btn = None
+            
+            loc_dl = page.get_by_text("다운로드", exact=True)
+            if loc_dl.count() > 0:
+                download_btn = loc_dl.first
+            else:
+                loc_dl = page.get_by_text("다운로드", exact=False)
+                if loc_dl.count() > 0:
+                    download_btn = loc_dl.first
+                    
+            if not download_btn:
+                for frame in page.frames:
+                    floc_dl = frame.get_by_text("다운로드", exact=True)
+                    if floc_dl.count() > 0:
+                        download_btn = floc_dl.first
+                        break
+                    else:
+                        floc_dl = frame.get_by_text("다운로드", exact=False)
+                        if floc_dl.count() > 0:
+                            download_btn = floc_dl.first
+                            break
+                            
+            if not download_btn:
+                print("❌ '다운로드' 버튼을 찾을 수 없습니다.")
+                return
+                
+            print("[*] 다운로드 버튼 클릭 및 파일 저장을 대기합니다...")
+            
+            download_dir = os.path.join(os.getcwd(), "downloads", "runtime")
+            os.makedirs(download_dir, exist_ok=True)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{account_id}_{report_name}_{timestamp}.csv"
+            save_path = os.path.join(download_dir, filename)
+            
+            try:
+                with page.expect_download(timeout=60000) as download_info:
+                    download_btn.click()
+                download = download_info.value
+                
+                print("[*] 파일 다운로드 중...")
+                download.save_as(save_path)
+                
+                print("\n" + "="*60)
+                print("✅ 보고서 다운로드 성공!")
+                print(f"저장 경로: {save_path}")
+                print("="*60 + "\n")
+                
+            except Exception as e:
+                print(f"\n❌ 다운로드 실패: {str(e)}\n")
+            
+        except Exception as e:
+            print(f"오류 발생: {str(e)}")
+            
+        finally:
+            print("[*] 브라우저를 닫습니다...")
+            browser.close()
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Naver Ads Report Downloader")
     parser.add_argument("--login-check", action="store_true", help="Launch browser to manually login and save session")
     parser.add_argument("--account-page-check", action="store_true", help="Check report page for a specific account")
     parser.add_argument("--open-report", action="store_true", help="Open a specific report page")
+    parser.add_argument("--download-report", action="store_true", help="Download a specific report")
     parser.add_argument("--account-id", type=str, help="Account ID")
-    parser.add_argument("--report-name", type=str, help="Report Name for --open-report")
+    parser.add_argument("--report-name", type=str, help="Report Name for --open-report / --download-report")
     
     args = parser.parse_args()
     
@@ -233,6 +374,12 @@ if __name__ == "__main__":
             print("예시: python -m src.naver_report_downloader --open-report --account-id 1855171 --report-name 데일리_살만")
         else:
             run_open_report(args.account_id, args.report_name)
+    elif args.download_report:
+        if not args.account_id or not args.report_name:
+            print("오류: --download-report 옵션은 --account-id 와 --report-name 이 모두 필요합니다.")
+            print("예시: python -m src.naver_report_downloader --download-report --account-id 1855171 --report-name 데일리_살만")
+        else:
+            run_download_report(args.account_id, args.report_name)
     else:
         print("현재 단계에서는 제한된 기능만 활성화되어 있습니다.")
-        print("사용 가능 옵션: --login-check, --account-page-check, --open-report")
+        print("사용 가능 옵션: --login-check, --account-page-check, --open-report, --download-report")
