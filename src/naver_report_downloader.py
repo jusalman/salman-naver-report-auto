@@ -114,11 +114,108 @@ def run_account_page_check(account_id):
             print("[*] 브라우저를 닫습니다...")
             browser.close()
 
+def run_open_report(account_id, report_name):
+    """
+    특정 광고계정의 보고서 목록에서 지정된 보고서명을 클릭하여
+    상세/조회 화면으로 진입하는 함수. 다운로드는 수행하지 않음.
+    """
+    profile_dir = os.getenv("BROWSER_PROFILE_DIR", "browser_profile")
+    target_url = f"https://ads.naver.com/manage/ad-accounts/{account_id}/sa/reports"
+    
+    print(f"[*] 브라우저 프로필 디렉토리: {profile_dir}")
+    print(f"[*] 대상 보고서 URL: {target_url}")
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
+            headless=False,
+            viewport={"width": 1280, "height": 800}
+        )
+        
+        page = browser.pages[0] if browser.pages else browser.new_page()
+        
+        print("[*] 보고서 페이지로 이동합니다...")
+        try:
+            page.goto(target_url, wait_until="networkidle")
+            page.wait_for_timeout(3000) # JS 렌더링 대기
+            
+            if "nid.naver.com" in page.url or "login" in page.url.lower():
+                print("NAVER_LOGIN_REQUIRED")
+                return
+            
+            if account_id not in page.url:
+                print("NAVER_ACCOUNT_ACCESS_ERROR")
+                return
+                
+            print(f"[*] '{report_name}' 보고서를 찾습니다...")
+            
+            target_element = None
+            
+            # 메인 페이지에서 검색
+            loc_exact = page.get_by_text(report_name, exact=True)
+            if loc_exact.count() > 0:
+                target_element = loc_exact.first
+            else:
+                loc_sub = page.get_by_text(report_name, exact=False)
+                if loc_sub.count() > 0:
+                    for i in range(loc_sub.count()):
+                        if loc_sub.nth(i).text_content() and loc_sub.nth(i).text_content().strip() == report_name:
+                            target_element = loc_sub.nth(i)
+                            break
+                    if not target_element:
+                        target_element = loc_sub.first
+            
+            # iframe에서 검색
+            if not target_element:
+                for frame in page.frames:
+                    loc_exact = frame.get_by_text(report_name, exact=True)
+                    if loc_exact.count() > 0:
+                        target_element = loc_exact.first
+                        break
+                    else:
+                        loc_sub = frame.get_by_text(report_name, exact=False)
+                        if loc_sub.count() > 0:
+                            for i in range(loc_sub.count()):
+                                if loc_sub.nth(i).text_content() and loc_sub.nth(i).text_content().strip() == report_name:
+                                    target_element = loc_sub.nth(i)
+                                    break
+                            if not target_element:
+                                target_element = loc_sub.first
+                            if target_element:
+                                break
+                                
+            if not target_element:
+                print(f"❌ '{report_name}' 보고서를 화면에서 찾을 수 없습니다.")
+                return
+                
+            print(f"[*] '{report_name}' 보고서를 클릭합니다...")
+            target_element.click()
+            
+            print("[*] 보고서 진입 대기 중...")
+            page.wait_for_timeout(3000) # 로딩 대기
+            
+            print("\n" + "="*60)
+            print("✅ 보고서 클릭 완료. 상세/조회 화면으로 진입했는지 확인해 주세요.")
+            print("(다운로드 버튼 클릭 및 파일 저장은 수행하지 않았습니다.)")
+            print("브라우저를 닫으려면 터미널에서 Enter를 누르세요.")
+            print("="*60 + "\n")
+            
+            input()
+            
+        except Exception as e:
+            print(f"오류 발생: {str(e)}")
+            
+        finally:
+            print("[*] 브라우저를 닫습니다...")
+            browser.close()
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Naver Ads Report Downloader")
     parser.add_argument("--login-check", action="store_true", help="Launch browser to manually login and save session")
     parser.add_argument("--account-page-check", action="store_true", help="Check report page for a specific account")
-    parser.add_argument("--account-id", type=str, help="Account ID for --account-page-check")
+    parser.add_argument("--open-report", action="store_true", help="Open a specific report page")
+    parser.add_argument("--account-id", type=str, help="Account ID")
+    parser.add_argument("--report-name", type=str, help="Report Name for --open-report")
     
     args = parser.parse_args()
     
@@ -130,6 +227,12 @@ if __name__ == "__main__":
             print("예시: python -m src.naver_report_downloader --account-page-check --account-id 1855171")
         else:
             run_account_page_check(args.account_id)
+    elif args.open_report:
+        if not args.account_id or not args.report_name:
+            print("오류: --open-report 옵션은 --account-id 와 --report-name 이 모두 필요합니다.")
+            print("예시: python -m src.naver_report_downloader --open-report --account-id 1855171 --report-name 데일리_살만")
+        else:
+            run_open_report(args.account_id, args.report_name)
     else:
-        print("현재 단계에서는 다른 기능이 비활성화되어 있습니다.")
-        print("옵션을 확인해주세요: --login-check 또는 --account-page-check")
+        print("현재 단계에서는 제한된 기능만 활성화되어 있습니다.")
+        print("사용 가능 옵션: --login-check, --account-page-check, --open-report")
