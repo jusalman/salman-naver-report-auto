@@ -44,6 +44,11 @@ st.markdown("""
         border: 1px solid #e0e0e0;
         margin-bottom: 25px;
     }
+    /* 버튼 색상 조정 (빨간색 방지) */
+    .stButton > button {
+        border-radius: 8px;
+        font-weight: 600;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -149,16 +154,23 @@ with st.container():
         </div>
         """, unsafe_allow_html=True)
 
-# 실행 버튼 영역
+# 2. 실행 버튼 영역
 col_btn, _ = st.columns([1, 2])
 with col_btn:
     btn_label = "🚀 오늘 보고서 수집 시작"
     if st.session_state.is_running:
         st.button(btn_label, disabled=True, key="btn_disabled", use_container_width=True)
     else:
-        if st.button(btn_label, use_container_width=True, type="primary"):
+        # type="primary"를 제거하여 파란색/중립톤으로 유지 (테마에 따라 다름)
+        if st.button(btn_label, use_container_width=True):
             st.session_state.is_running = True
             st.rerun()
+    
+    # 버튼 하단 간단 요약
+    if not accounts_df.empty:
+        success_today = accounts_df["마지막실행결과"].astype(str).eq("성공").sum()
+        fail_count = accounts_df["마지막실행결과"].astype(str).isin(["실패", "일부실패"]).sum()
+        st.caption(f"최근 실행 결과: {success_today}개 완료 · {fail_count}개 확인 필요")
 
 # 실행 로직
 if st.session_state.is_running:
@@ -185,8 +197,8 @@ if st.session_state.is_running:
                 if "성공: 0개" in stdout_text and "실패:" in stdout_text:
                     st.error("❌ 보고서 수집에 실패했습니다. 관리자에게 문의해 주세요.")
                 else:
-                    st.warning("⚠️ 일부 고객사에서 조치가 필요합니다. 아래 고객사를 확인해 주세요.")
-                status.update(label="⚠️ 일부 실패 발생", state="error", expanded=True)
+                    st.warning("⚠️ 일부 고객사에서 조치가 필요합니다. 아래 내용을 확인해 주세요.")
+                status.update(label="⚠️ 수집 결과 확인 필요", state="error", expanded=True)
             else:
                 st.error("❌ 시스템 오류가 발생했습니다. 관리자에게 문의해 주세요.")
                 status.update(label="❌ 시스템 오류", state="error", expanded=True)
@@ -196,31 +208,20 @@ if st.session_state.is_running:
         
         st.session_state.is_running = False
         st.cache_data.clear()
-        if st.button("🔄 결과 확인 및 화면 새로고침"):
+        if st.button("🔄 화면 새로고침"):
             st.rerun()
 
 st.markdown("---")
 
-# 대시보드 및 결과
+# 3. 운영 상태 요약 카드
 if not accounts_df.empty:
-    # 1. 조치 필요 고객사 섹션 (있을 때만)
+    st.subheader("📋 수집 현황 요약")
+    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+    
     fail_mask = accounts_df["마지막실행결과"].astype(str).isin(["실패", "일부실패"])
     fail_df = accounts_df[fail_mask].copy()
-    
-    if not fail_df.empty:
-        st.subheader("⚠️ 조치 필요 고객사")
-        # 조치용 DF 가공
-        action_df = fail_df.copy()
-        action_df["확인할 내용"] = action_df["오류내용"].apply(map_error_to_friendly_msg)
-        st.dataframe(
-            action_df[["고객사명", "마지막실행결과", "확인할 내용"]].rename(columns={"마지막실행결과": "상태"}),
-            use_container_width=True, hide_index=True
-        )
-        st.markdown("<br>", unsafe_allow_html=True)
+    fail_count = len(fail_df)
 
-    # 2. 운영 상태 요약 카드
-    st.subheader("📋 운영 상태 요약")
-    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
     with m_col1:
         st.metric("전체 고객사", len(accounts_df))
     with m_col2:
@@ -230,24 +231,39 @@ if not accounts_df.empty:
         success_today = accounts_df["마지막실행결과"].astype(str).eq("성공").sum()
         st.metric("정상 완료", success_today)
     with m_col4:
-        fail_count = len(fail_df)
         st.metric("조치 필요", fail_count, delta=fail_count if fail_count > 0 else None, delta_color="inverse")
 
-    # 3. 최근 실행 내역
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # 4. 확인이 필요한 고객사 (또는 완료 메시지)
+    if not fail_df.empty:
+        st.subheader("⚠️ 확인이 필요한 고객사가 있습니다")
+        st.info("아래 고객사의 네이버 보고서 설정을 확인해 주세요.")
+        
+        # 조치용 DF 가공
+        action_df = fail_df.copy()
+        action_df["확인할 내용"] = action_df["오류내용"].apply(map_error_to_friendly_msg)
+        st.dataframe(
+            action_df[["고객사명", "마지막실행결과", "확인할 내용"]].rename(columns={"마지막실행결과": "상태"}),
+            use_container_width=True, hide_index=True
+        )
+    else:
+        st.success("✅ 현재 조치가 필요한 고객사가 없습니다.")
+
+    # 5. 최근 실행 내역
     st.markdown("---")
     st.subheader("📋 최근 실행 내역")
     
     display_df = accounts_df.copy()
-    # 실행 대상이거나 최근 실행 기록이 있는 경우만 표시
     display_df = display_df[
         (display_df["실행여부"].astype(str).str.upper().isin(["TRUE", "YES", "1"])) |
         (display_df["마지막실행일시"].astype(str).str.strip() != "")
     ].copy()
     
-    display_df["메시지/오류내용"] = display_df["오류내용"].apply(lambda x: map_error_to_friendly_msg(x) if str(x).strip() else "정상 처리됨")
+    display_df["메시지/요구사항"] = display_df["오류내용"].apply(lambda x: map_error_to_friendly_msg(x) if str(x).strip() else "정상 처리됨")
     
     st.dataframe(
-        display_df[["고객사명", "마지막실행일시", "마지막실행결과", "메시지/오류내용"]].rename(columns={
+        display_df[["고객사명", "마지막실행일시", "마지막실행결과", "메시지/요구사항"]].rename(columns={
             "마지막실행일시": "마지막 실행 시간",
             "마지막실행결과": "상태"
         }).sort_values(by="마지막 실행 시간", ascending=False),
@@ -267,6 +283,6 @@ if show_admin:
             st.dataframe(accounts_df)
 
 st.markdown("---")
-st.caption("SALMAN OS - Naver Ads Report Automation Dashboard v1.3")
+st.caption("SALMAN OS - Naver Ads Report Automation Dashboard v1.4")
 
 
