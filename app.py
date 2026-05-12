@@ -44,10 +44,36 @@ st.markdown("""
         border: 1px solid #e0e0e0;
         margin-bottom: 25px;
     }
-    /* 버튼 색상 조정 (빨간색 방지) */
-    .stButton > button {
-        border-radius: 8px;
-        font-weight: 600;
+    /* 메인 실행 버튼 스타일링 (CTA 강조) */
+    div.stButton > button:first-child {
+        background-color: #2563EB !important;
+        color: white !important;
+        border: none !important;
+        padding: 0.6rem 1.2rem !important;
+        border-radius: 10px !important;
+        font-weight: 700 !important;
+        font-size: 1.1rem !important;
+        width: 100% !important;
+        transition: all 0.3s ease !important;
+        box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.2), 0 2px 4px -1px rgba(37, 99, 235, 0.1) !important;
+    }
+    div.stButton > button:first-child:hover {
+        background-color: #1D4ED8 !important;
+        color: white !important;
+        box-shadow: 0 10px 15px -3px rgba(37, 99, 235, 0.3), 0 4px 6px -2px rgba(37, 99, 235, 0.05) !important;
+        transform: translateY(-1px) !important;
+    }
+    div.stButton > button:first-child:active {
+        background-color: #1E3A8A !important;
+        transform: translateY(0px) !important;
+    }
+    /* 비활성화 상태 (실행 중) */
+    div.stButton > button:disabled {
+        background-color: #CBD5E1 !important;
+        color: #64748B !important;
+        cursor: not-allowed !important;
+        transform: none !important;
+        box-shadow: none !important;
     }
     </style>
     """, unsafe_allow_html=True)
