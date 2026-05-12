@@ -212,39 +212,40 @@ def run_open_report(account_id, report_name):
 def download_report(account_id, report_name, headless=False):
     """
     보고서를 찾아 클릭한 후, 다운로드 버튼을 눌러 실제 파일을 다운로드하는 함수.
-    성공 시 저장된 파일의 절대 경로를 반환합니다.
+    성공 시 (저장된 파일의 절대 경로, None, "") 를 반환합니다.
+    실패 시 (None, 오류코드, 오류메시지) 를 반환합니다.
     """
     from datetime import datetime
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    
     profile_dir = os.getenv("BROWSER_PROFILE_DIR", "browser_profile")
     target_url = f"https://ads.naver.com/manage/ad-accounts/{account_id}/sa/reports"
     
     print(f"[*] 브라우저 프로필 디렉토리: {profile_dir}")
     print(f"[*] 대상 보고서 URL: {target_url}")
     
-    save_path = None
-    
     with sync_playwright() as p:
-        browser = p.chromium.launch_persistent_context(
-            user_data_dir=profile_dir,
-            headless=headless,
-            viewport={"width": 1280, "height": 800},
-            accept_downloads=True
-        )
-        
-        page = browser.pages[0] if browser.pages else browser.new_page()
-        
-        print("[*] 보고서 페이지로 이동합니다...")
         try:
+            browser = p.chromium.launch_persistent_context(
+                user_data_dir=profile_dir,
+                headless=headless,
+                viewport={"width": 1280, "height": 800},
+                accept_downloads=True
+            )
+            
+            page = browser.pages[0] if browser.pages else browser.new_page()
+            
+            print("[*] 보고서 페이지로 이동합니다...")
             page.goto(target_url, wait_until="networkidle")
             page.wait_for_timeout(3000) # JS 렌더링 대기
             
             if "nid.naver.com" in page.url or "login" in page.url.lower():
                 print("NAVER_LOGIN_REQUIRED")
-                return None
+                return None, "NAVER_LOGIN_REQUIRED", "네이버 로그인이 필요합니다."
             
             if account_id not in page.url:
                 print("NAVER_ACCOUNT_ACCESS_ERROR")
-                return None
+                return None, "NAVER_ACCOUNT_ACCESS_ERROR", "광고계정 접근 권한이 없습니다."
                 
             print(f"[*] '{report_name}' 보고서를 찾습니다...")
             
@@ -285,7 +286,7 @@ def download_report(account_id, report_name, headless=False):
                                 
             if not target_element:
                 print(f"❌ '{report_name}' 보고서를 화면에서 찾을 수 없습니다.")
-                return None
+                return None, "REPORT_NOT_FOUND", f"'{report_name}' 보고서를 찾을 수 없습니다."
                 
             print(f"[*] '{report_name}' 보고서를 클릭합니다...")
             target_element.click()
@@ -318,7 +319,7 @@ def download_report(account_id, report_name, headless=False):
                             
             if not download_btn:
                 print("❌ '다운로드' 버튼을 찾을 수 없습니다.")
-                return None
+                return None, "DOWNLOAD_BUTTON_NOT_FOUND", "다운로드 버튼을 찾을 수 없습니다."
                 
             print("[*] 다운로드 버튼 클릭 및 파일 저장을 대기합니다...")
             
@@ -342,25 +343,33 @@ def download_report(account_id, report_name, headless=False):
                 print(f"저장 경로: {save_path}")
                 print("="*60 + "\n")
                 
+                return save_path, None, ""
+                
+            except PlaywrightTimeoutError:
+                print("\n❌ 다운로드 응답 시간 초과\n")
+                return None, "DOWNLOAD_TIMEOUT", "다운로드 응답 시간 초과"
             except Exception as e:
+                if "Timeout" in str(e):
+                    print("\n❌ 다운로드 응답 시간 초과\n")
+                    return None, "DOWNLOAD_TIMEOUT", "다운로드 응답 시간 초과"
                 print(f"\n❌ 다운로드 실패: {str(e)}\n")
-                return None
+                return None, "NAVER_DOWNLOAD_UNKNOWN_ERROR", f"다운로드 실패: {str(e)}"
             
         except Exception as e:
             print(f"오류 발생: {str(e)}")
-            return None
+            return None, "NAVER_DOWNLOAD_UNKNOWN_ERROR", f"예외 발생: {str(e)}"
             
         finally:
             print("[*] 브라우저를 닫습니다...")
-            browser.close()
-            
-    return save_path
+            if 'browser' in locals() and browser:
+                browser.close()
 
 def run_download_report(account_id, report_name):
     """
     기존 CLI 호환성을 위한 래퍼 함수
     """
-    return download_report(account_id, report_name, headless=False)
+    save_path, _, _ = download_report(account_id, report_name, headless=False)
+    return save_path
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Naver Ads Report Downloader")

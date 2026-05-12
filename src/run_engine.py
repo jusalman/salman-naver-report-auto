@@ -29,20 +29,23 @@ def process_report(account_name, account_id, report_info, is_actual_write):
         "success": False,
         "download_path": None,
         "write_status": "PENDING",
+        "error_code": "",
         "error_message": ""
     }
 
     # 1. 네이버 광고센터 보고서 다운로드
     try:
-        csv_path = download_report(account_id, report_name, headless=False)
+        csv_path, err_code, err_msg = download_report(account_id, report_name, headless=False)
     except Exception as e:
-        result["error_message"] = f"UNKNOWN_RUN_ENGINE_ERROR: {str(e)}"
-        print(f"\n[❌] {result['error_message']}")
+        result["error_code"] = "UNKNOWN_RUN_ENGINE_ERROR"
+        result["error_message"] = f"엔진 예외 발생: {str(e)}"
+        print(f"\n[❌] {result['error_code']}: {result['error_message']}")
         return result
 
     if not csv_path:
-        result["error_message"] = "DOWNLOAD_FAILED: 세션 만료 또는 보고서 탐색 실패"
-        print(f"\n[❌] {result['error_message']}")
+        result["error_code"] = err_code if err_code else "DOWNLOAD_FAILED"
+        result["error_message"] = err_msg if err_msg else "다운로드에 실패했습니다."
+        print(f"\n[❌] {result['error_code']}: {result['error_message']}")
         return result
 
     print(f"[*] 다운로드 완료: {csv_path}")
@@ -69,15 +72,17 @@ def process_report(account_name, account_id, report_info, is_actual_write):
             print(proc_result.stderr, file=sys.stderr)
 
         if proc_result.returncode != 0:
-            result["error_message"] = f"REPORT_WRITE_FAILED (Exit Code: {proc_result.returncode})"
+            result["error_code"] = "REPORT_WRITE_FAILED"
+            result["error_message"] = f"Exit Code: {proc_result.returncode}"
             result["write_status"] = "FAILED"
-            print(f"\n[❌] {result['error_message']}")
+            print(f"\n[❌] {result['error_code']}: {result['error_message']}")
             return result
 
     except Exception as e:
-        result["error_message"] = f"UNKNOWN_RUN_ENGINE_ERROR: {str(e)}"
+        result["error_code"] = "UNKNOWN_RUN_ENGINE_ERROR"
+        result["error_message"] = f"엔진 예외 발생: {str(e)}"
         result["write_status"] = "FAILED"
-        print(f"\n[❌] {result['error_message']}")
+        print(f"\n[❌] {result['error_code']}: {result['error_message']}")
         return result
 
     result["success"] = True
@@ -215,7 +220,9 @@ def main():
                 print(f"        - 다운로드: 실패")
             print(f"        - 저장상태: {r['write_status']}")
             if not r["success"]:
-                print(f"        - 오류원인: {r['error_message']}")
+                if r.get("error_code"):
+                    print(f"        - 오류코드: {r['error_code']}")
+                print(f"        - 오류메시지: {r['error_message']}")
         print()
 
     # 실패/조치필요 고객사 리스트
