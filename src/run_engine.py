@@ -5,6 +5,7 @@ import os
 import pandas as pd
 import datetime
 import pytz
+from pathlib import Path
 from src.naver_report_downloader import download_report
 from src.config_loader import ConfigLoader
 
@@ -224,14 +225,19 @@ def process_report(account_name, account_id, report_info, is_actual_write, keep_
     print(f"\n[✅] '{report_name}' 처리 성공")
     
     # 3. 파일 정리 (Cleanup)
-    if not keep_files:
+    if keep_files:
+        print(f"[CLEANUP] --keep-files 옵션으로 CSV 보관: {os.path.basename(csv_path)}")
+    else:
         try:
-            if os.path.exists(csv_path):
-                os.remove(csv_path)
+            p = Path(csv_path)
+            if p.exists():
+                p.unlink()
                 result["is_deleted"] = True
-                print(f"[CLEANUP] 다운로드 CSV 삭제 완료: {os.path.basename(csv_path)}")
+                print(f"[CLEANUP] CSV 삭제 완료: {p.name}")
+            else:
+                print(f"[CLEANUP_WARNING] 삭제 대상 파일 없음: {csv_path}")
         except Exception as e:
-            print(f"[CLEANUP_WARNING] 파일 삭제 실패: {csv_path} (사유: {e})")
+            print(f"[CLEANUP_WARNING] CSV 삭제 실패: {csv_path} / {e}")
     
     return result
 
