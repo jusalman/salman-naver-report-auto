@@ -1,5 +1,6 @@
 import os
 import argparse
+import re
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
@@ -32,6 +33,132 @@ def get_report_names_to_check():
         return report_names or DEFAULT_REPORT_NAMES_TO_CHECK
     except Exception:
         return DEFAULT_REPORT_NAMES_TO_CHECK
+
+def _page_contexts(page):
+    contexts = [page]
+    contexts.extend(page.frames)
+    return contexts
+
+def _context_text(context):
+    try:
+        return context.evaluate("() => document.body ? document.body.innerText : ''")
+    except Exception:
+        try:
+            return context.content()
+        except Exception:
+            return ""
+
+def _all_page_text(page):
+    texts = []
+    for context in _page_contexts(page):
+        text = _context_text(context)
+        if text:
+            texts.append(text)
+    return "\n".join(texts)
+
+def _print_detected_report_candidates(page):
+    text = _all_page_text(page)
+    candidates = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or "RAW" not in line:
+            continue
+        for candidate in re.findall(r"[^\s,;|/\\(){}\[\]<>]+(?:SA_RAW|_RAW)", line):
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+    print("[DEBUG] 화면에서 감지한 보고서명 후보:")
+    if candidates:
+        for candidate in candidates:
+            print(f"  - {candidate}")
+    else:
+        print("  - 감지된 후보 없음")
+
+def _try_first_locator(locator):
+    try:
+        if locator.count() > 0:
+            return locator.first
+    except Exception:
+        return None
+    return None
+
+def _find_report_locator_once(page, report_name):
+    for context in _page_contexts(page):
+        locator = _try_first_locator(context.get_by_text(report_name, exact=True))
+        if locator:
+            return locator
+
+    for context in _page_contexts(page):
+        locator = _try_first_locator(context.locator(f"text={report_name}"))
+        if locator:
+            return locator
+
+    for context in _page_contexts(page):
+        for selector in ["a", "button", "tr", "[role='row']", "[role='button']", "li", "div"]:
+            try:
+                locator = _try_first_locator(context.locator(selector).filter(has_text=report_name))
+                if locator:
+                    return locator
+            except Exception:
+                continue
+
+    if report_name in _all_page_text(page):
+        for context in _page_contexts(page):
+            locator = _try_first_locator(context.get_by_text(report_name, exact=False))
+            if locator:
+                return locator
+
+    return None
+
+def _scroll_report_page(page):
+    try:
+        page.mouse.wheel(0, 900)
+    except Exception:
+        pass
+    try:
+        page.evaluate("() => window.scrollBy(0, Math.floor(window.innerHeight * 0.8))")
+    except Exception:
+        pass
+    for frame in page.frames:
+        try:
+            frame.evaluate("""
+                () => {
+                    window.scrollBy(0, Math.floor(window.innerHeight * 0.8));
+                    for (const el of document.querySelectorAll('*')) {
+                        if (el.scrollHeight > el.clientHeight + 20) {
+                            el.scrollTop = Math.min(el.scrollTop + 900, el.scrollHeight);
+                        }
+                    }
+                }
+            """)
+        except Exception:
+            continue
+
+def find_report_locator(page, report_name, attempts=6):
+    for attempt in range(attempts):
+        locator = _find_report_locator_once(page, report_name)
+        if locator:
+            return locator
+
+        if report_name in _all_page_text(page):
+            break
+
+        _scroll_report_page(page)
+        page.wait_for_timeout(1500 if attempt < 2 else 2000)
+
+    return _find_report_locator_once(page, report_name)
+
+def wait_for_report_list(page, report_names=None, attempts=8):
+    report_names = report_names or []
+    for attempt in range(attempts):
+        page_text = _all_page_text(page)
+        if any(report_name in page_text for report_name in report_names):
+            return True
+        if "RAW" in page_text or "보고서" in page_text:
+            return True
+        _scroll_report_page(page)
+        page.wait_for_timeout(1500 if attempt < 3 else 2000)
+    return False
 
 def wait_for_login_enter():
     """로그인 완료 후 Enter 입력을 기다린다. stdin이 끊긴 경우 Windows 콘솔 입력으로 대기한다."""
@@ -137,24 +264,23 @@ def run_account_page_check(account_id):
                 return
             
             print("[*] 페이지 로딩 성공. 보고서 목록 영역을 확인합니다.")
-            
-            # 네이버 광고센터는 iframe을 사용할 수도 있으므로 모든 frame의 텍스트를 수집
-            all_text_content = page.content()
-            for frame in page.frames:
-                try:
-                    all_text_content += frame.content()
-                except Exception:
-                    pass
-            
+
             # 3. 텍스트 존재 여부 확인
             reports_to_check = get_report_names_to_check()
+            wait_for_report_list(page, reports_to_check)
             print("\n--- 보고서명 확인 결과 ---")
+            missing_reports = []
             for report in reports_to_check:
-                if report in all_text_content:
+                locator = find_report_locator(page, report, attempts=4)
+                if locator or report in _all_page_text(page):
                     print(f"  - {report}: 존재함 ✅")
                 else:
+                    missing_reports.append(report)
                     print(f"  - {report}: 없음 ❌")
             print("---------------------------\n")
+
+            if missing_reports:
+                _print_detected_report_candidates(page)
             
             print("="*60)
             print("확인이 완료되었습니다. 브라우저를 닫으려면 터미널에서 Enter를 누르세요.")
@@ -203,43 +329,11 @@ def run_open_report(account_id, report_name):
                 return
                 
             print(f"[*] '{report_name}' 보고서를 찾습니다...")
-            
-            target_element = None
-            
-            # 메인 페이지에서 검색
-            loc_exact = page.get_by_text(report_name, exact=True)
-            if loc_exact.count() > 0:
-                target_element = loc_exact.first
-            else:
-                loc_sub = page.get_by_text(report_name, exact=False)
-                if loc_sub.count() > 0:
-                    for i in range(loc_sub.count()):
-                        if loc_sub.nth(i).text_content() and loc_sub.nth(i).text_content().strip() == report_name:
-                            target_element = loc_sub.nth(i)
-                            break
-                    if not target_element:
-                        target_element = loc_sub.first
-            
-            # iframe에서 검색
+            wait_for_report_list(page, [report_name])
+            target_element = find_report_locator(page, report_name)
+                                 
             if not target_element:
-                for frame in page.frames:
-                    loc_exact = frame.get_by_text(report_name, exact=True)
-                    if loc_exact.count() > 0:
-                        target_element = loc_exact.first
-                        break
-                    else:
-                        loc_sub = frame.get_by_text(report_name, exact=False)
-                        if loc_sub.count() > 0:
-                            for i in range(loc_sub.count()):
-                                if loc_sub.nth(i).text_content() and loc_sub.nth(i).text_content().strip() == report_name:
-                                    target_element = loc_sub.nth(i)
-                                    break
-                            if not target_element:
-                                target_element = loc_sub.first
-                            if target_element:
-                                break
-                                
-            if not target_element:
+                _print_detected_report_candidates(page)
                 print(f"❌ '{report_name}' 보고서를 화면에서 찾을 수 없습니다.")
                 return
                 
@@ -303,43 +397,11 @@ def download_report(account_id, report_name, headless=False):
                 return None, "NAVER_ACCOUNT_ACCESS_ERROR", "광고계정 접근 권한이 없습니다."
                 
             print(f"[*] '{report_name}' 보고서를 찾습니다...")
-            
-            target_element = None
-            
-            # 메인 페이지에서 검색
-            loc_exact = page.get_by_text(report_name, exact=True)
-            if loc_exact.count() > 0:
-                target_element = loc_exact.first
-            else:
-                loc_sub = page.get_by_text(report_name, exact=False)
-                if loc_sub.count() > 0:
-                    for i in range(loc_sub.count()):
-                        if loc_sub.nth(i).text_content() and loc_sub.nth(i).text_content().strip() == report_name:
-                            target_element = loc_sub.nth(i)
-                            break
-                    if not target_element:
-                        target_element = loc_sub.first
-            
-            # iframe에서 검색
+            wait_for_report_list(page, [report_name])
+            target_element = find_report_locator(page, report_name)
+                                 
             if not target_element:
-                for frame in page.frames:
-                    loc_exact = frame.get_by_text(report_name, exact=True)
-                    if loc_exact.count() > 0:
-                        target_element = loc_exact.first
-                        break
-                    else:
-                        loc_sub = frame.get_by_text(report_name, exact=False)
-                        if loc_sub.count() > 0:
-                            for i in range(loc_sub.count()):
-                                if loc_sub.nth(i).text_content() and loc_sub.nth(i).text_content().strip() == report_name:
-                                    target_element = loc_sub.nth(i)
-                                    break
-                            if not target_element:
-                                target_element = loc_sub.first
-                            if target_element:
-                                break
-                                
-            if not target_element:
+                _print_detected_report_candidates(page)
                 print(f"❌ '{report_name}' 보고서를 화면에서 찾을 수 없습니다.")
                 return None, "REPORT_NOT_FOUND", f"'{report_name}' 보고서를 찾을 수 없습니다."
                 
