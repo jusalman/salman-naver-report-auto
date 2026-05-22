@@ -401,17 +401,29 @@ def process_report(account_name, account_id, report_info, is_actual_write, keep_
     ]
 
     print(f"[*] 데이터 저장 단계 진입 ({writer_mode})...")
+    stdout_text = ""
+    stderr_text = ""
+    no_data_success = False
     try:
         # check=False로 설정하여 내부 에러 메시지를 직접 처리
         proc_result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        stdout_text = proc_result.stdout or ""
+        stderr_text = proc_result.stderr or ""
         
         # subprocess 출력 연결
-        if proc_result.stdout:
-            print(proc_result.stdout)
-        if proc_result.stderr:
-            print(proc_result.stderr, file=sys.stderr)
+        if stdout_text:
+            print(stdout_text)
+        if stderr_text:
+            print(stderr_text, file=sys.stderr)
 
-        if proc_result.returncode != 0:
+        no_data_success = (
+            "NO_DATA_SUCCESS" in stdout_text
+            or "EMPTY_REPORT_SUCCESS" in stdout_text
+            or "저장할 데이터가 없습니다." in stdout_text
+            or "저장행수: 0" in stdout_text
+        )
+
+        if proc_result.returncode != 0 and not no_data_success:
             result["error_code"] = "REPORT_WRITE_FAILED"
             result["error_message"] = f"Exit Code: {proc_result.returncode}"
             result["write_status"] = "FAILED"
@@ -426,7 +438,12 @@ def process_report(account_name, account_id, report_info, is_actual_write, keep_
         return result
 
     result["success"] = True
-    result["write_status"] = "ACTUAL_WRITE_SUCCESS" if is_actual_write else "DRY_RUN_SUCCESS"
+    if no_data_success:
+        result["no_data"] = True
+        result["rows_written"] = 0
+        result["write_status"] = "NO_DATA_SUCCESS"
+    else:
+        result["write_status"] = "ACTUAL_WRITE_SUCCESS" if is_actual_write else "DRY_RUN_SUCCESS"
     print(f"\n[✅] '{report_name}' 처리 성공")
     
     # 3. 파일 정리 (Cleanup)
@@ -637,6 +654,8 @@ def main():
         for r in results:
             r_status = "✅" if r["success"] else "❌"
             print(f"    {r_status} 네이버보고서명: {r['report_name']}")
+            if r.get("no_data"):
+                print(f"        - 데이터 없음 / 저장행수 0 / {r['write_status']}")
             print(f"        - 저장탭명: {r['tab_name']}")
             print(f"        - 통계기간: {r['period']}")
             if r["download_path"]:
