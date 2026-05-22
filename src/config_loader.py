@@ -8,7 +8,9 @@ from src.models import (
     EXPECTED_COLUMNS_ACCOUNTS, 
     EXPECTED_COLUMNS_REPORTS, 
     EXPECTED_COLUMNS_DOWNLOAD_LOG, 
-    EXPECTED_COLUMNS_ERROR_LOG
+    EXPECTED_COLUMNS_ERROR_LOG,
+    DEFAULT_REPORT_CONFIGS,
+    normalize_report_destination
 )
 
 load_dotenv()
@@ -55,7 +57,19 @@ class ConfigLoader:
         return self._read_and_validate("CONFIG_ACCOUNTS", EXPECTED_COLUMNS_ACCOUNTS)
 
     def load_config_reports(self) -> pd.DataFrame:
-        return self._read_and_validate("CONFIG_REPORTS", EXPECTED_COLUMNS_REPORTS)
+        df = self._read_and_validate("CONFIG_REPORTS", EXPECTED_COLUMNS_REPORTS)
+        if df.empty:
+            logger.warning("CONFIG_REPORTS is empty. Falling back to built-in default report configs.")
+            return pd.DataFrame(DEFAULT_REPORT_CONFIGS, columns=EXPECTED_COLUMNS_REPORTS)
+
+        if "네이버보고서명" in df.columns and "저장탭명" in df.columns:
+            normalized = df.apply(
+                lambda row: normalize_report_destination(row.get("네이버보고서명", ""), row.get("저장탭명", "")),
+                axis=1,
+            )
+            df["네이버보고서명"] = normalized.apply(lambda value: value[0])
+            df["저장탭명"] = normalized.apply(lambda value: value[1])
+        return df
 
     def load_download_log(self) -> pd.DataFrame:
         return self._read_and_validate("DOWNLOAD_LOG", EXPECTED_COLUMNS_DOWNLOAD_LOG)

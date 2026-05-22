@@ -8,6 +8,97 @@ import pytz
 from pathlib import Path
 from src.naver_report_downloader import download_report
 from src.config_loader import ConfigLoader
+from src.run_policy import get_today_execution_plan
+
+OPERATION_SHEET_NAMES = ("CONFIG_ACCOUNTS", "CONFIG_REPORTS", "DOWNLOAD_LOG", "ERROR_LOG")
+
+def is_skipped_reason(reason):
+    return str(reason).startswith("SKIPPED_")
+
+def _first_existing_column(df, candidates):
+    if df is None:
+        return None
+
+    def normalize_header(value):
+        return str(value).replace("\ufeff", "").replace(" ", "").strip()
+
+    normalized_columns = {normalize_header(col): col for col in df.columns}
+    for candidate in candidates:
+        if candidate in df.columns:
+            return candidate
+        normalized_candidate = normalize_header(candidate)
+        if normalized_candidate in normalized_columns:
+            return normalized_columns[normalized_candidate]
+    return None
+
+def _clean_config_value(value):
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+def _get_mapping_value(mapping, candidates, default="N/A"):
+    normalized_mapping = {str(key).replace("\ufeff", "").replace(" ", "").strip(): key for key in mapping.keys()}
+    for candidate in candidates:
+        if candidate in mapping:
+            value = _clean_config_value(mapping.get(candidate))
+            return value if value else default
+        normalized_candidate = str(candidate).replace("\ufeff", "").replace(" ", "").strip()
+        if normalized_candidate in normalized_mapping:
+            value = _clean_config_value(mapping.get(normalized_mapping[normalized_candidate]))
+            return value if value else default
+    return default
+
+def _is_run_enabled(value):
+    return _clean_config_value(value).upper() == "TRUE"
+
+def _is_operating(value):
+    return _clean_config_value(value) == "운영중"
+
+def _filter_execution_target_accounts(df):
+    """CONFIG_ACCOUNTS rows that are eligible for --all-accounts execution."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=[] if df is None else df.columns)
+
+    run_col = _first_existing_column(df, ["실행여부", "실행 여부"])
+    status_col = _first_existing_column(df, ["운영상태", "운영 상태"])
+    if not run_col or not status_col:
+        return df.iloc[0:0].copy()
+
+    mask = df.apply(lambda row: _is_run_enabled(row.get(run_col)) and _is_operating(row.get(status_col)), axis=1)
+    return df[mask].copy()
+
+def _split_required_account_rows(df):
+    if df is None or df.empty:
+        return (pd.DataFrame(columns=[] if df is None else df.columns),
+                pd.DataFrame(columns=[] if df is None else df.columns))
+
+    target_sheet_col = _first_existing_column(df, ["저장구글시트ID", "저장 구글시트 ID"])
+    naver_id_col = _first_existing_column(df, ["네이버광고계정ID", "네이버 광고계정 ID"])
+    valid_mask = pd.Series(True, index=df.index)
+
+    if target_sheet_col:
+        valid_mask &= df[target_sheet_col].apply(lambda value: _clean_config_value(value) != "")
+    if naver_id_col:
+        valid_mask &= df[naver_id_col].apply(lambda value: _clean_config_value(value) != "")
+
+    return df[valid_mask].copy(), df[~valid_mask].copy()
+
+def _build_config_accounts_df(active_df, skipped_df, invalid_df):
+    frames = [df for df in [active_df, skipped_df, invalid_df] if df is not None and not df.empty]
+    if not frames:
+        columns = active_df.columns if active_df is not None else []
+        return pd.DataFrame(columns=columns)
+    return pd.concat(frames, ignore_index=True).drop_duplicates()
+
+def _get_missing_account_reason(row):
+    target_sheet_col = _first_existing_column(pd.DataFrame(columns=row.index), ["저장구글시트ID", "저장 구글시트 ID"])
+    naver_id_col = _first_existing_column(pd.DataFrame(columns=row.index), ["네이버광고계정ID", "네이버 광고계정 ID"])
+
+    if target_sheet_col and _clean_config_value(row.get(target_sheet_col)) == "":
+        return "MISSING_TARGET_SPREADSHEET_ID"
+    if naver_id_col and _clean_config_value(row.get(naver_id_col)) == "":
+        return "MISSING_NAVER_ACCOUNT_ID"
+    return "UNKNOWN_INVALID"
 
 def get_column_letter(n):
     """숫자 인덱스를 엑셀 컬럼 문자(A, B, C...)로 변환합니다."""
@@ -17,12 +108,126 @@ def get_column_letter(n):
         result = chr(65 + remainder) + result
     return result
 
+def _normalize_sheet_header(value):
+    return str(value).replace("\ufeff", "").replace(" ", "").replace("_", "").strip().lower()
+
+def _value_for_log_header(header, values):
+    normalized_header = _normalize_sheet_header(header)
+    candidates = {
+        "timestamp": ["실행일시", "다운로드일시", "저장일시", "오류일시", "일시", "timestamp", "createdat"],
+        "account_name": ["고객명", "계정명", "광고주명", "accountname", "account"],
+        "account_id": ["네이버계정id", "네이버광고계정id", "광고계정id", "accountid"],
+        "report_name": ["보고서명", "리포트명", "reportname"],
+        "tab_name": ["저장탭", "대상탭", "시트명", "tabname", "sheetname"],
+        "period": ["기간", "조회기간", "period"],
+        "file_path": ["파일경로", "다운로드파일경로", "저장파일경로", "최근다운로드파일경로", "filepath", "downloadpath"],
+        "status": ["결과", "상태", "실행결과", "저장결과", "status"],
+        "error_code": ["오류코드", "에러코드", "errorcode"],
+        "error_message": ["오류내용", "오류메시지", "에러내용", "errormessage"],
+    }
+    for key, aliases in candidates.items():
+        if normalized_header in [_normalize_sheet_header(alias) for alias in aliases]:
+            return values.get(key, "")
+    return ""
+
+def _append_log_row(sheet_client, spreadsheet_id, sheet_name, values):
+    rows = sheet_client.get_sheet_data(spreadsheet_id, f"{sheet_name}!A:Z")
+    if not rows:
+        print(f"[WARNING] {sheet_name} tab has no header row; skipped log write.")
+        return
+
+    headers = rows[0]
+    row_values = [_value_for_log_header(header, values) for header in headers]
+    next_row = len(rows) + 1
+    end_col = get_column_letter(max(len(headers), 1))
+    sheet_client.update_sheet_data(spreadsheet_id, f"{sheet_name}!A{next_row}:{end_col}{next_row}", [row_values])
+
+def append_execution_logs(all_execution_results, skipped_or_invalid_accounts, is_actual_write, loader):
+    if not is_actual_write:
+        return
+
+    hub_id = os.getenv("HUB_SPREADSHEET_ID")
+    if not hub_id:
+        print("[WARNING] HUB_SPREADSHEET_ID is missing; skipped log write.")
+        return
+
+    seoul_tz = pytz.timezone('Asia/Seoul')
+    now_str = datetime.datetime.now(seoul_tz).strftime("%Y-%m-%d %H:%M:%S")
+    sheet_client = loader.sheet_client
+
+    for account_info, results in all_execution_results:
+        account_name = _get_mapping_value(account_info, ["고객명", "계정명", "광고주명", "æ€¨ì¢‰ì»¼?Ñ‰ì±¸"])
+        account_id = _get_mapping_value(account_info, ["네이버계정ID", "네이버광고계정ID", "광고계정ID", "?ã…¼ì” è¸°ê¾§í‚…æ€¨ì¢‰í€Ž?ë·žD"])
+        for result in results:
+            values = {
+                "timestamp": now_str,
+                "account_name": account_name,
+                "account_id": account_id,
+                "report_name": result.get("report_name", ""),
+                "tab_name": result.get("tab_name", ""),
+                "period": result.get("period", ""),
+                "file_path": result.get("download_path", ""),
+                "status": "SUCCESS" if result.get("success") else "FAILED",
+                "error_code": result.get("error_code", ""),
+                "error_message": result.get("error_message", ""),
+            }
+            _append_log_row(sheet_client, hub_id, "DOWNLOAD_LOG" if result.get("success") else "ERROR_LOG", values)
+
+    for account_info, reason in skipped_or_invalid_accounts:
+        if is_skipped_reason(reason):
+            continue
+        values = {
+            "timestamp": now_str,
+            "account_name": _get_mapping_value(account_info, ["고객명", "계정명", "광고주명", "æ€¨ì¢‰ì»¼?Ñ‰ì±¸"]),
+            "account_id": _get_mapping_value(account_info, ["네이버계정ID", "네이버광고계정ID", "광고계정ID", "?ã…¼ì” è¸°ê¾§í‚…æ€¨ì¢‰í€Ž?ë·žD"]),
+            "report_name": "",
+            "tab_name": "",
+            "period": "",
+            "file_path": "",
+            "status": "FAILED",
+            "error_code": reason,
+            "error_message": reason,
+        }
+        _append_log_row(sheet_client, hub_id, "ERROR_LOG", values)
+
+def run_preflight(loader):
+    hub_id = os.getenv("HUB_SPREADSHEET_ID")
+    if not hub_id:
+        print("[ERROR] HUB_SPREADSHEET_ID is missing.")
+        return 1
+
+    missing_or_empty = []
+    for sheet_name in OPERATION_SHEET_NAMES:
+        rows = loader.sheet_client.get_sheet_data(hub_id, f"{sheet_name}!A:Z")
+        if not rows:
+            missing_or_empty.append(sheet_name)
+
+    if missing_or_empty:
+        print("[ERROR] Required operation sheets are missing or empty: " + ", ".join(missing_or_empty))
+        return 1
+
+    print("[OK] Required operation sheets are available: " + ", ".join(OPERATION_SHEET_NAMES))
+    return 0
+
 def update_hub_status(all_execution_results, skipped_or_invalid_accounts, is_actual_write, loader):
     """실행 결과를 CONFIG_ACCOUNTS 탭에 업데이트합니다."""
     seoul_tz = pytz.timezone('Asia/Seoul')
     now_str = datetime.datetime.now(seoul_tz).strftime("%Y-%m-%d %H:%M:%S")
     
     if not is_actual_write:
+        total_reports = sum(len(results) for _, results in all_execution_results)
+        success_reports = sum(sum(1 for r in results if r["success"]) for _, results in all_execution_results)
+        failed_reports = total_reports - success_reports
+        failed_accounts = len(skipped_or_invalid_accounts) + sum(1 for _, results in all_execution_results if any(not r["success"] for r in results))
+
+        print("\n" + "="*80)
+        print("[DRY-RUN] CONFIG_ACCOUNTS 업데이트 예정 요약")
+        print(f" - 실행 결과 업데이트 대상 고객사: {len(all_execution_results) + len(skipped_or_invalid_accounts)}개")
+        print(f" - 조치 필요 고객사: {failed_accounts}개")
+        print(f" - 보고서 성공/실패: {success_reports}개 / {failed_reports}개")
+        print("="*80 + "\n")
+        return
+
         print("\n" + "="*80)
         print("[DRY-RUN] CONFIG_ACCOUNTS 업데이트 예정:")
         
@@ -40,7 +245,7 @@ def update_hub_status(all_execution_results, skipped_or_invalid_accounts, is_act
             
         # 스킵/오류 고객사 처리
         for acc_info, reason in skipped_or_invalid_accounts:
-            if reason == "SKIPPED_BY_POLICY":
+            if is_skipped_reason(reason):
                 status = "미실행"
             else:
                 status = f"실패 / {reason}"
@@ -129,7 +334,7 @@ def update_hub_status(all_execution_results, skipped_or_invalid_accounts, is_act
         row_num = row_idx_map.get(acc_id) or row_idx_map.get(acc_name)
         if not row_num: continue
         
-        if reason == "SKIPPED_BY_POLICY":
+        if is_skipped_reason(reason):
             res_status = "미실행"
             error_content = ""
         else:
@@ -264,11 +469,12 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Dry run mode (validate only)")
     parser.add_argument("--write", action="store_true", help="Actual write mode")
     parser.add_argument("--keep-files", action="store_true", help="Keep downloaded CSV files after processing")
+    parser.add_argument("--preflight-only", action="store_true", help="Validate required operation sheets only")
 
     args = parser.parse_args()
 
     # 인자 유효성 검사
-    if not args.all_accounts:
+    if not args.preflight_only and not args.all_accounts:
         if not args.account_name or not args.account_id:
             parser.error("--account-name and --account-id are required unless --all-accounts is used.")
         if not args.all_reports and not args.report_name:
@@ -278,6 +484,9 @@ def main():
     is_actual_write = args.write
     keep_files = args.keep_files
     loader = ConfigLoader()
+
+    if args.preflight_only:
+        sys.exit(run_preflight(loader))
     
     # 보고서 설정 로드
     df_reports = loader.load_config_reports()
@@ -292,10 +501,26 @@ def main():
 
     all_execution_results = [] # [(account_info, [report_results])]
     skipped_or_invalid_accounts = [] # (account_info, reason)
+    total_config_accounts_count = len(all_execution_results)
+    execution_target_accounts_count = len(all_execution_results)
+    excluded_accounts_count = 0
 
     if args.all_accounts:
         print("\n[*] 전체 고객사 실행 모드 진입")
         active_df, skipped_df, invalid_df = loader.get_filtered_accounts()
+
+        config_accounts_df = _build_config_accounts_df(active_df, skipped_df, invalid_df)
+        execution_target_df = _filter_execution_target_accounts(config_accounts_df)
+        active_df = _filter_execution_target_accounts(active_df)
+        invalid_df = _filter_execution_target_accounts(invalid_df)
+        active_df, invalid_active_df = _split_required_account_rows(active_df)
+        if invalid_active_df is not None and not invalid_active_df.empty:
+            invalid_df = pd.concat([invalid_df, invalid_active_df], ignore_index=True).drop_duplicates()
+        skipped_df = skipped_df.iloc[0:0].copy() if skipped_df is not None else pd.DataFrame()
+
+        total_config_accounts_count = len(config_accounts_df)
+        execution_target_accounts_count = len(execution_target_df)
+        excluded_accounts_count = total_config_accounts_count - execution_target_accounts_count
         
         # invalid 처리 (필수 필드 누락)
         for _, row in invalid_df.iterrows():
@@ -311,12 +536,24 @@ def main():
             skipped_or_invalid_accounts.append((row.to_dict(), "SKIPPED_BY_POLICY"))
 
         # active 실행
+        execution_plan = get_today_execution_plan(active_df, df_reports)
+        reports_by_account_id = {}
+        for item in execution_plan:
+            account = item["account"]
+            report = item["report"]
+            account_id = str(account.get("네이버광고계정ID", ""))
+            reports_by_account_id.setdefault(account_id, []).append(report)
+
         for _, row in active_df.iterrows():
             account_info = row.to_dict()
+            account_reports = reports_by_account_id.get(str(account_info.get("네이버광고계정ID", "")), [])
+            if not account_reports:
+                continue
+
             report_results = process_account_reports(
                 account_info["고객사명"], 
                 account_info["네이버광고계정ID"], 
-                active_reports, 
+                account_reports, 
                 is_actual_write,
                 keep_files=keep_files
             )
@@ -342,6 +579,41 @@ def main():
     fail_reports_count = total_reports_run - success_reports_count
     
     success_accounts_count = sum(1 for _, results in all_execution_results if all(r["success"] for r in results))
+
+    if args.all_accounts:
+        update_hub_status(all_execution_results, skipped_or_invalid_accounts, is_actual_write, loader)
+        append_execution_logs(all_execution_results, skipped_or_invalid_accounts, is_actual_write, loader)
+
+        total_failures_count = fail_reports_count + len(skipped_or_invalid_accounts)
+
+        print("\n" + "="*80)
+        print(" [최종 요약]")
+        print("="*80)
+        print(f" - 전체 CONFIG_ACCOUNTS 행 수: {total_config_accounts_count}개")
+        print(f" - 실행 대상 고객사 수: {execution_target_accounts_count}개")
+        print(f" - 실행 제외 고객사 수: {excluded_accounts_count}개")
+        print(f" - 전체 보고서 실행 수: {total_reports_run}개")
+        print(f" - 성공 수: {success_reports_count}개")
+        print(f" - 실패 수: {total_failures_count}개")
+
+        if total_failures_count > 0:
+            print("-" * 80)
+            print(" [조치 필요 고객사]")
+            for acc, reason in skipped_or_invalid_accounts:
+                account_name = _get_mapping_value(acc, ["고객사명", "고객사 명"])
+                account_id = _get_mapping_value(acc, ["네이버광고계정ID", "네이버 광고계정 ID"])
+                print(f" - {account_name} ({account_id}): {reason}")
+            for account_info, results in all_execution_results:
+                failed_results = [r for r in results if not r["success"]]
+                if not failed_results:
+                    continue
+                account_name = _get_mapping_value(account_info, ["고객사명", "고객사 명"])
+                account_id = _get_mapping_value(account_info, ["네이버광고계정ID", "네이버 광고계정 ID"])
+                error_codes = ", ".join(r.get("error_code") or "UNKNOWN" for r in failed_results)
+                print(f" - {account_name} ({account_id}): {error_codes}")
+        print("="*80 + "\n")
+
+        sys.exit(1 if total_failures_count > 0 else 0)
 
     print("\n" + "="*80)
     print(" [ 전 체 실 행 결 과 요 약 ]")
@@ -393,7 +665,9 @@ def main():
         update_hub_status(all_execution_results, skipped_or_invalid_accounts, is_actual_write, loader)
 
     # 최종 종료 코드 결정
-    if fail_reports_count > 0 or any(reason != "SKIPPED_BY_POLICY" for _, reason in skipped_or_invalid_accounts):
+    append_execution_logs(all_execution_results, skipped_or_invalid_accounts, is_actual_write, loader)
+
+    if fail_reports_count > 0 or any(not is_skipped_reason(reason) for _, reason in skipped_or_invalid_accounts):
         sys.exit(1)
     else:
         sys.exit(0)

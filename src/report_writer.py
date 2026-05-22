@@ -7,6 +7,7 @@ import pandas as pd
 from src.error_logger import ErrorLogger, append_download_log, append_error_log
 from src.google_sheet_client import GoogleSheetClient
 from src.report_parser import ParseResult
+from src.models import DEFAULT_REPORT_CONFIGS, EXPECTED_COLUMNS_REPORTS, normalize_report_destination
 
 # .env 로드
 load_dotenv()
@@ -145,10 +146,19 @@ class ReportWriter:
 
         # 2. CONFIG_REPORTS 조회
         reports_data = self.sheet_client.get_sheet_data(hub_id, "CONFIG_REPORTS!A:Z")
-        if not reports_data or len(reports_data) < 2:
-            raise ValueError("CONFIG_REPORTS tab is empty or missing headers")
-        
-        rep_df = pd.DataFrame(reports_data[1:], columns=reports_data[0])
+        if reports_data and len(reports_data) >= 2:
+            rep_df = pd.DataFrame(reports_data[1:], columns=reports_data[0])
+        else:
+            rep_df = pd.DataFrame(DEFAULT_REPORT_CONFIGS, columns=EXPECTED_COLUMNS_REPORTS)
+
+        if "네이버보고서명" in rep_df.columns and "저장탭명" in rep_df.columns:
+            normalized = rep_df.apply(
+                lambda row: normalize_report_destination(row.get("네이버보고서명", ""), row.get("저장탭명", "")),
+                axis=1,
+            )
+            rep_df["네이버보고서명"] = normalized.apply(lambda value: value[0])
+            rep_df["저장탭명"] = normalized.apply(lambda value: value[1])
+
         # 네이버보고서명 또는 저장탭명으로 검색
         report_row = rep_df[(rep_df['네이버보고서명'] == report_name) | (rep_df['저장탭명'] == report_name)]
         
@@ -156,6 +166,7 @@ class ReportWriter:
             raise ValueError(f"Report '{report_name}' not found in CONFIG_REPORTS")
         
         report_info = report_row.iloc[0]
+        naver_report_name = report_info.get("네이버보고서명", "")
 
         return {
             "customer_name": account_name,
@@ -163,7 +174,7 @@ class ReportWriter:
             "naver_account_id": account_info.get("네이버광고계정ID", ""),
             "target_spreadsheet_id": account_info.get("저장구글시트ID", ""),
             "target_tab_name": report_info.get("저장탭명", ""),
-            "report_name": report_info.get("네이버보고서명", "")
+            "report_name": naver_report_name
         }
 
 if __name__ == '__main__':
