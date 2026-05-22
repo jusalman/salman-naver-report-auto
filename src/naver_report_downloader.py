@@ -6,6 +6,29 @@ from playwright.sync_api import sync_playwright
 # .env 로드
 load_dotenv()
 
+def wait_for_login_enter():
+    """로그인 완료 후 Enter 입력을 기다린다. stdin이 끊긴 경우 Windows 콘솔 입력으로 대기한다."""
+    prompt = "네이버 광고센터에 로그인한 뒤 이 창에서 Enter를 눌러주세요."
+    print(prompt)
+    try:
+        input()
+        return
+    except EOFError:
+        print("표준 입력을 사용할 수 없어 콘솔 키 입력 대기 방식으로 전환합니다.")
+
+    try:
+        import msvcrt
+        print(prompt)
+        while True:
+            key = msvcrt.getwch()
+            if key in ("\r", "\n"):
+                return
+    except Exception:
+        import time
+        print("키 입력을 받을 수 없습니다. 브라우저를 30분 동안 유지합니다.")
+        print("로그인이 끝나면 브라우저를 직접 닫거나, 대기 시간이 끝날 때까지 기다려주세요.")
+        time.sleep(1800)
+
 def run_login_check():
     """
     Playwright persistent context를 사용하여 브라우저를 열고,
@@ -29,22 +52,27 @@ def run_login_check():
         # 기본 페이지 또는 새 페이지 가져오기
         page = browser.pages[0] if browser.pages else browser.new_page()
         
-        # 네이버 광고센터로 이동
-        print("[*] 네이버 광고센터로 이동합니다...")
-        page.goto(base_url)
-        
-        print("\n" + "="*60)
-        print("🌐 네이버 광고센터 창이 열렸습니다.")
-        print("⚠️ 만약 로그인이 되어 있지 않다면, 직접 로그인해 주세요.")
-        print("✅ 로그인이 완료되면 이 터미널에서 Enter 키를 눌러주세요.")
-        print("="*60 + "\n")
-        
-        # 사용자 입력을 대기 (터미널에서 Enter 입력 시까지 브라우저 유지)
-        input("로그인 완료 후 터미널에서 Enter를 누르세요...")
-        
-        print("\n[*] 세션을 저장하고 브라우저를 닫습니다...")
-        browser.close()
-        print("[*] 완료되었습니다. 다음 실행 시 세션이 유지됩니다.")
+        try:
+            # 네이버 광고센터로 이동
+            print("[*] 네이버 광고센터로 이동합니다...")
+            try:
+                page.goto(base_url)
+            except Exception as e:
+                print(f"[!] 네이버 광고센터 이동 중 오류가 발생했습니다: {e}")
+                print("[!] 브라우저 창은 유지됩니다. 열린 창에서 직접 네이버 광고센터에 접속해 주세요.")
+            
+            print("\n" + "="*60)
+            print("🌐 네이버 광고센터 창이 열렸습니다.")
+            print("⚠️ 만약 로그인이 되어 있지 않다면, 직접 로그인해 주세요.")
+            print("✅ 로그인이 완료되면 이 터미널에서 Enter 키를 눌러주세요.")
+            print("="*60 + "\n")
+            
+            wait_for_login_enter()
+            
+            print("\n[*] 세션을 저장하고 브라우저를 닫습니다...")
+        finally:
+            browser.close()
+            print("[*] 완료되었습니다. 다음 실행 시 세션이 유지됩니다.")
 
 def run_account_page_check(account_id):
     """
