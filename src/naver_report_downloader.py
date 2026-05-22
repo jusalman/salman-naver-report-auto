@@ -6,6 +6,33 @@ from playwright.sync_api import sync_playwright
 # .env 로드
 load_dotenv()
 
+DEFAULT_REPORT_NAMES_TO_CHECK = [
+    "데일리SA_RAW",
+    "데일리전환SA_RAW",
+    "위클리키워드SA_RAW",
+]
+
+def get_report_names_to_check():
+    """
+    CONFIG_REPORTS의 네이버보고서명을 우선 사용하고, 읽을 수 없으면 새 표준 기본값을 사용한다.
+    """
+    try:
+        from src.config_loader import ConfigLoader
+
+        reports_df = ConfigLoader().load_config_reports()
+        if "네이버보고서명" not in reports_df.columns:
+            return DEFAULT_REPORT_NAMES_TO_CHECK
+
+        report_names = []
+        for value in reports_df["네이버보고서명"].tolist():
+            report_name = "" if value is None else str(value).strip()
+            if report_name and report_name not in report_names:
+                report_names.append(report_name)
+
+        return report_names or DEFAULT_REPORT_NAMES_TO_CHECK
+    except Exception:
+        return DEFAULT_REPORT_NAMES_TO_CHECK
+
 def wait_for_login_enter():
     """로그인 완료 후 Enter 입력을 기다린다. stdin이 끊긴 경우 Windows 콘솔 입력으로 대기한다."""
     prompt = "네이버 광고센터에 로그인한 뒤 이 창에서 Enter를 눌러주세요."
@@ -120,7 +147,7 @@ def run_account_page_check(account_id):
                     pass
             
             # 3. 텍스트 존재 여부 확인
-            reports_to_check = ["데일리_살만", "데일리전환_살만", "위클리키워드_살만"]
+            reports_to_check = get_report_names_to_check()
             print("\n--- 보고서명 확인 결과 ---")
             for report in reports_to_check:
                 if report in all_text_content:
@@ -421,13 +448,13 @@ if __name__ == "__main__":
     elif args.open_report:
         if not args.account_id or not args.report_name:
             print("오류: --open-report 옵션은 --account-id 와 --report-name 이 모두 필요합니다.")
-            print("예시: python -m src.naver_report_downloader --open-report --account-id 1855171 --report-name 데일리_살만")
+            print("예시: python -m src.naver_report_downloader --open-report --account-id 1855171 --report-name 데일리SA_RAW")
         else:
             run_open_report(args.account_id, args.report_name)
     elif args.download_report:
         if not args.account_id or not args.report_name:
             print("오류: --download-report 옵션은 --account-id 와 --report-name 이 모두 필요합니다.")
-            print("예시: python -m src.naver_report_downloader --download-report --account-id 1855171 --report-name 데일리_살만")
+            print("예시: python -m src.naver_report_downloader --download-report --account-id 1855171 --report-name 데일리SA_RAW")
         else:
             run_download_report(args.account_id, args.report_name)
     else:

@@ -17,7 +17,7 @@ class GoogleSheetClient:
             logger.error("Failed to build Google Sheets service.")
             raise
 
-    def get_sheet_data(self, spreadsheet_id: str, range_name: str) -> list[list]:
+    def get_sheet_data(self, spreadsheet_id: str, range_name: str, value_render_option=None) -> list[list]:
         """
         Reads data from a specific range in a Google Sheet.
         Returns a list of lists representing rows and columns.
@@ -25,7 +25,14 @@ class GoogleSheetClient:
         """
         try:
             sheet = self.service.spreadsheets()
-            result = sheet.values().get(spreadsheetId=spreadsheet_id, range=range_name).execute()
+            request = sheet.values().get(spreadsheetId=spreadsheet_id, range=range_name)
+            if value_render_option:
+                request = sheet.values().get(
+                    spreadsheetId=spreadsheet_id,
+                    range=range_name,
+                    valueRenderOption=value_render_option,
+                )
+            result = request.execute()
             values = result.get('values', [])
             return self.normalize_sheet_rows(values)
         except HttpError as err:
@@ -65,7 +72,7 @@ class GoogleSheetClient:
                 
         return normalized
 
-    def append_sheet_data(self, spreadsheet_id: str, range_name: str, values: list[list]):
+    def append_sheet_data(self, spreadsheet_id: str, range_name: str, values: list[list], value_input_option: str = 'USER_ENTERED'):
         """
         Appends data to a Google Sheet.
         """
@@ -77,7 +84,7 @@ class GoogleSheetClient:
             result = sheet.values().append(
                 spreadsheetId=spreadsheet_id, 
                 range=range_name,
-                valueInputOption='USER_ENTERED',
+                valueInputOption=value_input_option,
                 body=body
             ).execute()
             return result
@@ -117,14 +124,14 @@ class GoogleSheetClient:
             logger.error(f"Failed to add sheet '{title}': {e}")
             return None
 
-    def update_sheet_data(self, spreadsheet_id: str, range_name: str, values: list[list]):
+    def update_sheet_data(self, spreadsheet_id: str, range_name: str, values: list[list], value_input_option: str = 'USER_ENTERED'):
         """Updates data in a specific range."""
         try:
             body = {'values': values}
             return self.service.spreadsheets().values().update(
                 spreadsheetId=spreadsheet_id,
                 range=range_name,
-                valueInputOption='USER_ENTERED',
+                valueInputOption=value_input_option,
                 body=body
             ).execute()
         except Exception as e:

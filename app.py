@@ -162,10 +162,11 @@ seoul_tz = pytz.timezone('Asia/Seoul')
 now = datetime.now(seoul_tz)
 st.sidebar.info(f"🕒 {now.strftime('%Y-%m-%d %H:%M:%S')}")
 
+# 내부 로컬 운영 권장값: .env에 ADMIN_MODE=true
 is_admin_mode = os.getenv("ADMIN_MODE", "false").lower() == "true"
 if is_admin_mode:
     st.sidebar.markdown("---")
-    show_admin = st.sidebar.checkbox("🔒 관리자 전용 옵션", value=False)
+    show_admin = st.sidebar.checkbox("🔐 로그인/시스템 관리", value=False)
 else:
     show_admin = False
 
@@ -322,19 +323,20 @@ if not accounts_df.empty:
 
 # 관리자 도구
 if show_admin:
+    st.info("네이버 비밀번호가 변경되었거나 로그인이 풀린 경우, 아래 버튼으로 네이버 광고센터를 다시 연결하세요.")
+    if st.button("🔐 네이버 로그인 다시 연결"):
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        bat_path = os.path.join(project_root, "네이버_로그인_다시연결.bat")
+        if os.path.exists(bat_path):
+            subprocess.Popen(["cmd", "/k", bat_path], cwd=project_root)
+            st.info("로그인 재연결 창을 열었습니다. 열린 브라우저에서 네이버 광고센터에 로그인한 뒤, 터미널에서 Enter를 눌러 완료하세요.")
+        else:
+            st.error("네이버_로그인_다시연결.bat 파일을 찾을 수 없습니다.")
+
     with st.expander("🛠️ 관리자 전용 데이터 도구", expanded=False):
         if st.button("🔄 시트 데이터 강제 새로고침"):
             st.cache_data.clear()
             st.rerun()
-        if st.button("🔐 네이버 로그인 다시 연결"):
-            project_root = os.path.dirname(os.path.abspath(__file__))
-            bat_path = os.path.join(project_root, "네이버_로그인_다시연결.bat")
-            if os.path.exists(bat_path):
-                subprocess.Popen(["cmd", "/k", bat_path], cwd=project_root)
-                st.info("로그인 재연결 창을 열었습니다. 열린 브라우저에서 네이버 광고센터에 로그인한 뒤, 터미널에서 Enter를 눌러 완료하세요.")
-            else:
-                st.error("네이버_로그인_다시연결.bat 파일을 찾을 수 없습니다.")
-
         st.write(f"HUB_ID: {hub_id}")
         st.write(f"Python: {sys.executable}")
         st.write("운영 탭: CONFIG_ACCOUNTS, CONFIG_REPORTS, DOWNLOAD_LOG, ERROR_LOG")
