@@ -190,7 +190,7 @@ with st.container():
     st.markdown("""
         <div class="hero-container">
             <h3 style='margin-top:0;'>🗓️ 오늘 보고서 수집 상태</h3>
-            <p style='color: #666; margin-bottom: 0;'>버튼을 누르면 실행 대상 고객사의 보고서를 자동으로 수집하여 구글 시트에 업데이트합니다.</p>
+            <p style='color: #666; margin-bottom: 0;'>이 화면은 자동화 PC에서 실행 중입니다. 버튼을 누르면 실제 구글시트에 저장됩니다.</p>
         </div>
         """, unsafe_allow_html=True)
 
