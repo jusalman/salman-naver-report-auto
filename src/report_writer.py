@@ -18,6 +18,48 @@ class ReportWriter:
     def __init__(self):
         self.sheet_client = GoogleSheetClient()
 
+    @staticmethod
+    def _column_letter(n: int) -> str:
+        result = ""
+        while n > 0:
+            n, remainder = divmod(n - 1, 26)
+            result = chr(65 + remainder) + result
+        return result
+
+    @staticmethod
+    def _sheet_cell(value) -> str:
+        if pd.isna(value):
+            return ""
+        return str(value)
+
+    @classmethod
+    def _row_key(cls, row: list, width: int) -> tuple:
+        return tuple(cls._sheet_cell(row[i]) if i < len(row) else "" for i in range(width))
+
+    @classmethod
+    def _new_rows_for_append(cls, df: pd.DataFrame, headers: list, existing_rows: list[list]) -> list[list]:
+        missing_columns = [col for col in df.columns if col not in headers]
+        if missing_columns:
+            raise ValueError(
+                "Existing sheet headers do not contain report columns: "
+                + ", ".join(str(col) for col in missing_columns)
+            )
+
+        width = len(headers)
+        existing_keys = {cls._row_key(row, width) for row in existing_rows}
+        append_rows = []
+        queued_keys = set()
+
+        for record in df.to_dict(orient="records"):
+            row = [cls._sheet_cell(record.get(header, "")) for header in headers]
+            key = cls._row_key(row, width)
+            if key in existing_keys or key in queued_keys:
+                continue
+            append_rows.append(row)
+            queued_keys.add(key)
+
+        return append_rows
+
     def _ensure_tab_exists(self, spreadsheet_id: str, tab_name: str):
         info = self.sheet_client.get_sheet_info(spreadsheet_id)
         if not info:
@@ -35,7 +77,7 @@ class ReportWriter:
         existing_data = self.sheet_client.get_sheet_data(spreadsheet_id, f"{tab_name}!A1:Z1")
         if not existing_data or not existing_data[0]:
             logger.info(f"Writing headers to '{tab_name}'")
-            self.sheet_client.update_sheet_data(spreadsheet_id, f"{tab_name}!A1", [columns])
+            self.sheet_client.update_sheet_data(spreadsheet_id, f"{tab_name}!A1", [columns], value_input_option='RAW')
             return True
         return False
 
@@ -46,35 +88,34 @@ class ReportWriter:
         """
         logger.info(f"Starting write process for tab '{tab_name}' (dry_run={dry_run})")
         
-        if not parse_result.success or parse_result.dataframe is None or parse_result.dataframe.empty:
+        if not parse_result.success:
             logger.warning("No valid data to write.")
             return {"success": False, "rows_written": 0, "message": "No valid data"}
 
-        df = parse_result.dataframe
-        
-        # 1. 날짜 컬럼 확정 (중복 방지용)
-        target_date_col = None
-        if len(parse_result.date_column_candidates) == 1:
-            target_date_col = parse_result.date_column_candidates[0]
-        elif len(parse_result.date_column_candidates) > 1:
-            return {"success": False, "rows_written": 0, "message": f"Multiple date column candidates found: {parse_result.date_column_candidates}. Cannot perform safe deduplication."}
-        else:
-            return {"success": False, "rows_written": 0, "message": "No date column detected. Cannot perform safe deduplication."}
+        if parse_result.dataframe is None:
+            logger.warning("No valid data to write.")
+            return {"success": False, "rows_written": 0, "message": "No valid data"}
 
-        if target_date_col not in df.columns:
-            return {"success": False, "rows_written": 0, "message": f"Date column '{target_date_col}' not found in data."}
+        if getattr(parse_result, "no_data", False) or parse_result.dataframe.empty:
+            message = "저장할 데이터가 없습니다."
+            logger.info(message)
+            return {
+                "success": True,
+                "no_data": True,
+                "rows_written": 0,
+                "message": message,
+                "status": "NO_DATA_SUCCESS",
+                "dry_run": dry_run,
+            }
 
-        # 새 데이터의 고유 날짜들 추출
-        new_dates = df[target_date_col].astype(str).unique().tolist()
-        logger.info(f"Data contains dates: {new_dates}")
+        df = parse_result.dataframe.fillna("")
 
         # Dry Run 모드
         if dry_run:
             logger.info(f"[DRY-RUN] Target Spreadsheet ID: {spreadsheet_id}")
             logger.info(f"[DRY-RUN] Target Tab: {tab_name}")
-            logger.info(f"[DRY-RUN] Date Column to use for deduplication: {target_date_col}")
-            logger.info(f"[DRY-RUN] Rows to write: {len(df)}")
-            logger.info("[DRY-RUN] 실제 실행 시, 위 날짜의 기존 데이터는 삭제되고 새 데이터가 저장됩니다.")
+            logger.info(f"[DRY-RUN] Candidate rows: {len(df)}")
+            logger.info("[DRY-RUN] 실제 실행 시 기존 행은 수정하지 않고, 중복되지 않은 raw 행만 아래에 추가합니다.")
             return {"success": True, "rows_written": len(df), "message": "Dry run successful", "dry_run": True}
 
         # 실제 쓰기
@@ -82,38 +123,21 @@ class ReportWriter:
             self._ensure_tab_exists(spreadsheet_id, tab_name)
             self._ensure_headers(spreadsheet_id, tab_name, list(df.columns))
 
-            # 2. 중복 방지 (기존 데이터 읽기 -> 해당 날짜 제외 -> 새 데이터 추가 -> 전체 덮어쓰기)
             existing_data = self.sheet_client.get_sheet_data(spreadsheet_id, f"{tab_name}!A:Z")
-            
-            if existing_data and len(existing_data) > 1:
-                headers = existing_data[0]
-                if target_date_col in headers:
-                    date_idx = headers.index(target_date_col)
-                    
-                    filtered_data = [headers]
-                    # 새 데이터에 포함된 날짜가 아닌 기존 데이터만 유지
-                    for row in existing_data[1:]:
-                        row_date = str(row[date_idx]) if date_idx < len(row) else ""
-                        if row_date not in new_dates:
-                            filtered_data.append(row)
-                    
-                    # 새 데이터 추가 (NaN 처리 포함)
-                    new_data_list = df.fillna("").astype(str).values.tolist()
-                    filtered_data.extend(new_data_list)
-                    
-                    # 덮어쓰기
-                    logger.info("Overwriting sheet with deduplicated data...")
-                    self.sheet_client.clear_sheet_data(spreadsheet_id, f"{tab_name}!A:Z")
-                    self.sheet_client.update_sheet_data(spreadsheet_id, f"{tab_name}!A1", filtered_data)
-                    rows_written = len(new_data_list)
-                else:
-                    # 헤더에 날짜 컬럼이 없으면 안전을 위해 에러 처리
-                    return {"success": False, "rows_written": 0, "message": f"Date column '{target_date_col}' not found in existing sheet headers."}
-            else:
-                # 시트가 비어있거나 헤더만 있는 경우 단순 추가
-                new_data_list = df.fillna("").astype(str).values.tolist()
-                self.sheet_client.append_sheet_data(spreadsheet_id, f"{tab_name}!A1", new_data_list)
-                rows_written = len(new_data_list)
+            headers = existing_data[0] if existing_data else list(df.columns)
+            existing_rows = existing_data[1:] if len(existing_data) > 1 else []
+            new_data_list = self._new_rows_for_append(df, headers, existing_rows)
+
+            if new_data_list:
+                end_col = self._column_letter(len(headers))
+                self.sheet_client.append_sheet_data(
+                    spreadsheet_id,
+                    f"{tab_name}!A:{end_col}",
+                    new_data_list,
+                    value_input_option='RAW',
+                )
+
+            rows_written = len(new_data_list)
 
             logger.info(f"Successfully wrote {rows_written} rows to '{tab_name}'")
             return {"success": True, "rows_written": rows_written, "message": "Success", "dry_run": False}
@@ -279,6 +303,11 @@ if __name__ == '__main__':
             tab_name=tab_name, 
             parse_result=parse_res,
             dry_run=args.dry_run
+        )
+        print(
+            f"저장 결과: {res.get('message', '')} / "
+            f"저장행수: {res.get('rows_written', 0)} / "
+            f"status: {res.get('status', 'SUCCESS' if res.get('success') else 'FAILED')}"
         )
 
         # 4. DOWNLOAD_LOG 기록

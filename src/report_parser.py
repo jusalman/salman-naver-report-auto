@@ -23,6 +23,7 @@ class ParseResult:
     columns: list = field(default_factory=list)
     date_column_candidates: list = field(default_factory=list)
     dataframe: pd.DataFrame = None
+    no_data: bool = False
     error_type: str = ""
     error_message: str = ""
 
@@ -118,11 +119,15 @@ def parse_naver_csv(file_bytes: bytes, file_name: str) -> ParseResult:
     
     if df.empty:
         return ParseResult(
-            success=False,
+            success=True,
             file_name=file_name,
             report_name=report_name,
-            error_type="EMPTY_REPORT_FILE",
-            error_message="파싱 후 데이터 행이 없습니다."
+            row_count=0,
+            column_count=len(df.columns),
+            columns=list(df.columns),
+            date_column_candidates=find_date_columns(list(df.columns)),
+            dataframe=df,
+            no_data=True,
         )
     
     columns = list(df.columns)
@@ -182,11 +187,15 @@ def parse_naver_xlsx(file_bytes: bytes, file_name: str) -> ParseResult:
     
     if df.empty:
         return ParseResult(
-            success=False,
+            success=True,
             file_name=file_name,
             report_name=report_name,
-            error_type="EMPTY_REPORT_FILE",
-            error_message="파싱 후 데이터 행이 없습니다."
+            row_count=0,
+            column_count=len(df.columns),
+            columns=list(df.columns),
+            date_column_candidates=find_date_columns(list(df.columns)),
+            dataframe=df,
+            no_data=True,
         )
     
     columns = list(df.columns)
