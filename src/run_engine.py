@@ -12,6 +12,16 @@ from src.run_policy import get_today_execution_plan
 
 OPERATION_SHEET_NAMES = ("CONFIG_ACCOUNTS", "CONFIG_REPORTS", "DOWNLOAD_LOG", "ERROR_LOG")
 
+def _configure_stdio():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except Exception:
+                pass
+
+_configure_stdio()
+
 def is_skipped_reason(reason):
     return str(reason).startswith("SKIPPED_")
 
@@ -66,6 +76,35 @@ def _filter_execution_target_accounts(df):
 
     mask = df.apply(lambda row: _is_run_enabled(row.get(run_col)) and _is_operating(row.get(status_col)), axis=1)
     return df[mask].copy()
+
+def _parse_account_ids_arg(value):
+    if not value:
+        return set()
+    return {item.strip() for item in str(value).split(",") if item.strip()}
+
+def _account_id_column(df):
+    return _first_existing_column(df, ["네이버광고계정ID", "네이버 광고계정 ID", "네이버계정ID", "광고계정ID", "account_id"])
+
+def _filter_rows_by_account_ids(df, selected_account_ids):
+    if df is None or df.empty or not selected_account_ids:
+        return df
+
+    account_id_col = _account_id_column(df)
+    if not account_id_col:
+        return df.iloc[0:0].copy()
+
+    mask = df[account_id_col].apply(lambda value: _clean_config_value(value) in selected_account_ids)
+    return df[mask].copy()
+
+def _collect_account_ids(df):
+    if df is None or df.empty:
+        return set()
+
+    account_id_col = _account_id_column(df)
+    if not account_id_col:
+        return set()
+
+    return {_clean_config_value(value) for value in df[account_id_col] if _clean_config_value(value)}
 
 def _split_required_account_rows(df):
     if df is None or df.empty:
@@ -138,9 +177,10 @@ def _append_log_row(sheet_client, spreadsheet_id, sheet_name, values):
 
     headers = rows[0]
     row_values = [_value_for_log_header(header, values) for header in headers]
-    next_row = len(rows) + 1
     end_col = get_column_letter(max(len(headers), 1))
-    sheet_client.update_sheet_data(spreadsheet_id, f"{sheet_name}!A{next_row}:{end_col}{next_row}", [row_values])
+    result = sheet_client.append_sheet_data(spreadsheet_id, f"{sheet_name}!A:{end_col}", [row_values])
+    if result is None:
+        print(f"[WARNING] {sheet_name} log append failed.")
 
 def append_execution_logs(all_execution_results, skipped_or_invalid_accounts, is_actual_write, loader):
     if not is_actual_write:
@@ -395,8 +435,10 @@ def process_report(account_name, account_id, report_info, is_actual_write, keep_
     cmd = [
         sys.executable, "-m", "src.report_writer",
         "--account-name", account_name,
+        "--account-id", str(account_id),
         "--report-name", report_name,
         "--file-path", csv_path,
+        "--skip-log",
         writer_mode
     ]
 
@@ -406,7 +448,18 @@ def process_report(account_name, account_id, report_info, is_actual_write, keep_
     no_data_success = False
     try:
         # check=False로 설정하여 내부 에러 메시지를 직접 처리
-        proc_result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        output_encoding = sys.stdout.encoding or "utf-8"
+        child_env = os.environ.copy()
+        child_env["PYTHONIOENCODING"] = f"{output_encoding}:replace"
+        proc_result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding=output_encoding,
+            errors="replace",
+            env=child_env,
+            check=False,
+        )
         stdout_text = proc_result.stdout or ""
         stderr_text = proc_result.stderr or ""
         
@@ -483,6 +536,7 @@ def main():
     parser.add_argument("--report-name", type=str, help="Report name (e.g. 데일리_살만)")
     parser.add_argument("--all-reports", action="store_true", help="Run all predefined reports for the account")
     parser.add_argument("--all-accounts", action="store_true", help="Run all active accounts and their active reports")
+    parser.add_argument("--account-ids", type=str, help="Comma-separated Naver account IDs to run within --all-accounts")
     parser.add_argument("--dry-run", action="store_true", help="Dry run mode (validate only)")
     parser.add_argument("--write", action="store_true", help="Actual write mode")
     parser.add_argument("--keep-files", action="store_true", help="Keep downloaded CSV files after processing")
@@ -524,7 +578,26 @@ def main():
 
     if args.all_accounts:
         print("\n[*] 전체 고객사 실행 모드 진입")
+        selected_account_ids = _parse_account_ids_arg(args.account_ids)
         active_df, skipped_df, invalid_df = loader.get_filtered_accounts()
+
+        if selected_account_ids:
+            all_config_rows = _build_config_accounts_df(active_df, skipped_df, invalid_df)
+            known_account_ids = _collect_account_ids(all_config_rows)
+            unknown_account_ids = selected_account_ids - known_account_ids
+
+            print(f"[*] 선택 고객사 실행 모드: {len(selected_account_ids)}개 ID")
+            active_df = _filter_rows_by_account_ids(active_df, selected_account_ids)
+            skipped_df = _filter_rows_by_account_ids(skipped_df, selected_account_ids)
+            invalid_df = _filter_rows_by_account_ids(invalid_df, selected_account_ids)
+
+            for unknown_id in sorted(unknown_account_ids):
+                skipped_or_invalid_accounts.append(
+                    (
+                        {"고객사명": "선택 고객사", "네이버광고계정ID": unknown_id},
+                        "ACCOUNT_ID_NOT_FOUND_IN_CONFIG",
+                    )
+                )
 
         config_accounts_df = _build_config_accounts_df(active_df, skipped_df, invalid_df)
         execution_target_df = _filter_execution_target_accounts(config_accounts_df)

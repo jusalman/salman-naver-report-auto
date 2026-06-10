@@ -1,9 +1,12 @@
 import logging
+import time
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from src.google_auth import get_google_credentials
 
 logger = logging.getLogger(__name__)
+
+RETRYABLE_READ_STATUSES = {429, 500, 502, 503, 504}
 
 class GoogleSheetClient:
     def __init__(self):
@@ -23,24 +26,29 @@ class GoogleSheetClient:
         Returns a list of lists representing rows and columns.
         Data is normalized so that all rows have the same length as the header.
         """
-        try:
-            sheet = self.service.spreadsheets()
-            request = sheet.values().get(spreadsheetId=spreadsheet_id, range=range_name)
-            if value_render_option:
-                request = sheet.values().get(
-                    spreadsheetId=spreadsheet_id,
-                    range=range_name,
-                    valueRenderOption=value_render_option,
-                )
-            result = request.execute()
-            values = result.get('values', [])
-            return self.normalize_sheet_rows(values)
-        except HttpError as err:
-            logger.error(f"HTTP Error occurred while accessing Google Sheets API: {err.resp.status}")
-            return []
-        except Exception as e:
-            logger.error(f"An unexpected error occurred while fetching sheet data: {e}")
-            return []
+        for attempt in range(4):
+            try:
+                sheet = self.service.spreadsheets()
+                request = sheet.values().get(spreadsheetId=spreadsheet_id, range=range_name)
+                if value_render_option:
+                    request = sheet.values().get(
+                        spreadsheetId=spreadsheet_id,
+                        range=range_name,
+                        valueRenderOption=value_render_option,
+                    )
+                result = request.execute()
+                values = result.get('values', [])
+                return self.normalize_sheet_rows(values)
+            except HttpError as err:
+                status = err.resp.status
+                if status in RETRYABLE_READ_STATUSES and attempt < 3:
+                    time.sleep(2 ** attempt)
+                    continue
+                logger.error(f"HTTP Error occurred while accessing Google Sheets API: {status}")
+                return []
+            except Exception as e:
+                logger.error(f"An unexpected error occurred while fetching sheet data: {e}")
+                return []
 
     @staticmethod
     def normalize_sheet_rows(rows: list[list]) -> list[list]:
@@ -97,14 +105,19 @@ class GoogleSheetClient:
 
     def get_sheet_info(self, spreadsheet_id: str):
         """Returns spreadsheet info including list of sheets."""
-        try:
-            return self.service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-        except HttpError as err:
-            logger.error(f"HTTP Error getting sheet info: {err.resp.status}")
-            return None
-        except Exception as e:
-            logger.error(f"Unexpected error getting sheet info: {e}")
-            return None
+        for attempt in range(4):
+            try:
+                return self.service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+            except HttpError as err:
+                status = err.resp.status
+                if status in RETRYABLE_READ_STATUSES and attempt < 3:
+                    time.sleep(2 ** attempt)
+                    continue
+                logger.error(f"HTTP Error getting sheet info: {status}")
+                return None
+            except Exception as e:
+                logger.error(f"Unexpected error getting sheet info: {e}")
+                return None
 
     def add_sheet(self, spreadsheet_id: str, title: str):
         """Adds a new sheet (tab) to the spreadsheet."""
