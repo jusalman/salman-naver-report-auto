@@ -1,8 +1,10 @@
 credentials/
 token/
 .env
-browser_profile/
+browser_profile*/
 downloads/runtime/
+.playwright_upgrade_state
+.venv/
 logs/
 *.json
 *.xlsx
