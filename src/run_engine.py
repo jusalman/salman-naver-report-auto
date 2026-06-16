@@ -6,7 +6,7 @@ import pandas as pd
 import datetime
 import pytz
 from pathlib import Path
-from src.naver_report_downloader import download_report
+from src.naver_report_downloader import download_report, ensure_browser_ready
 from src.config_loader import ConfigLoader
 from src.run_policy import get_today_execution_plan
 
@@ -558,7 +558,10 @@ def main():
 
     if args.preflight_only:
         sys.exit(run_preflight(loader))
-    
+
+    # Playwright 자동 유지보수 (chromium 설치 확인, 주 1회 업그레이드, 잠금 파일 정리)
+    ensure_browser_ready()
+
     # 보고서 설정 로드
     df_reports = loader.load_config_reports()
     if df_reports.empty:

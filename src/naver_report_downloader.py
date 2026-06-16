@@ -1,4 +1,7 @@
 import os
+import sys
+import subprocess
+import time
 import argparse
 import re
 from dotenv import load_dotenv
@@ -358,7 +361,107 @@ def run_open_report(account_id, report_name):
             print("[*] 브라우저를 닫습니다...")
             browser.close()
 
-def download_report(account_id, report_name, headless=False):
+def _get_profile_chromium_revision(profile_dir: str) -> int:
+    """browser_profile에 마지막으로 접속한 Chromium revision 번호를 반환합니다."""
+    try:
+        raw = open(os.path.join(profile_dir, "Last Browser"), "rb").read()
+        text = raw.decode("utf-16-le", errors="ignore").strip()
+        match = re.search(r"chromium-(\d+)", text)
+        if match:
+            return int(match.group(1))
+    except Exception:
+        pass
+    return 0
+
+
+def _get_playwright_chromium_revision() -> int:
+    """현재 playwright 패키지가 사용하는 Chromium revision 번호를 반환합니다."""
+    try:
+        with sync_playwright() as p:
+            match = re.search(r"chromium-(\d+)", p.chromium.executable_path)
+            if match:
+                return int(match.group(1))
+    except Exception:
+        pass
+    return 0
+
+
+def _delete_browser_profile_lock(profile_dir: str):
+    """브라우저 프로파일 잠금 파일을 제거합니다."""
+    lock_path = os.path.join(profile_dir, "Default", "LOCK")
+    try:
+        if os.path.exists(lock_path):
+            os.remove(lock_path)
+            print(f"[*] 브라우저 프로파일 잠금 파일 제거: {lock_path}")
+    except Exception as e:
+        print(f"[!] 잠금 파일 제거 실패: {e}")
+
+
+def ensure_browser_ready():
+    """
+    Playwright Chromium을 자동으로 최신 상태로 유지합니다.
+
+    - 매 실행: chromium 바이너리 존재 여부 확인 및 자동 설치
+    - 주 1회 또는 버전 불일치 감지 시: playwright 패키지 업그레이드 후 프로세스 재시작
+    - 브라우저 프로파일 잔여 잠금 파일 정리
+    """
+    load_dotenv()
+    profile_dir = os.getenv("BROWSER_PROFILE_DIR", "browser_profile")
+    state_file = ".playwright_upgrade_state"
+    already_upgraded = os.environ.get("_PLAYWRIGHT_AUTO_UPGRADED") == "1"
+
+    needs_upgrade = False
+
+    if not already_upgraded:
+        # 버전 불일치 감지: 프로파일이 현재 playwright보다 최신 chromium을 요구하는 경우
+        profile_rev = _get_profile_chromium_revision(profile_dir)
+        playwright_rev = _get_playwright_chromium_revision()
+        if profile_rev > 0 and playwright_rev > 0 and profile_rev > playwright_rev:
+            print(f"[*] Chromium 버전 불일치 감지 (프로파일:{profile_rev} > 설치:{playwright_rev})")
+            needs_upgrade = True
+
+        # 주 1회 정기 업그레이드
+        if not needs_upgrade:
+            try:
+                last_ts = float(open(state_file).read().strip()) if os.path.exists(state_file) else 0.0
+                needs_upgrade = (time.time() - last_ts) >= 7 * 86400
+            except Exception:
+                needs_upgrade = True
+
+    if needs_upgrade:
+        print("[*] Playwright 자동 업그레이드 실행 중...")
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "playwright", "--upgrade", "-q"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            with open(state_file, "w") as f:
+                f.write(str(time.time()))
+        except Exception:
+            pass
+        print("[*] Playwright 업그레이드 완료. 새 버전 적용을 위해 재시작합니다...")
+        env = os.environ.copy()
+        env["_PLAYWRIGHT_AUTO_UPGRADED"] = "1"
+        # -c 인라인 실행이나 재시작 불가 환경에서는 재시작 생략 (다음 실행 시 적용)
+        if sys.argv and sys.argv[0] not in ("-c", "-m", ""):
+            result = subprocess.run([sys.executable] + sys.argv, env=env)
+            sys.exit(result.returncode)
+        print("[*] 다음 실행 시 새 버전이 적용됩니다.")
+    else:
+        # 바이너리만 확인 (이미 설치돼 있으면 즉시 완료)
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    _delete_browser_profile_lock(profile_dir)
+
+
+def download_report(account_id, report_name, headless=False, _retried=False):
     """
     보고서를 찾아 클릭한 후, 다운로드 버튼을 눌러 실제 파일을 다운로드하는 함수.
     성공 시 (저장된 파일의 절대 경로, None, "") 를 반환합니다.
@@ -473,9 +576,15 @@ def download_report(account_id, report_name, headless=False):
                 return None, "NAVER_DOWNLOAD_UNKNOWN_ERROR", f"다운로드 실패: {str(e)}"
             
         except Exception as e:
-            print(f"오류 발생: {str(e)}")
-            return None, "NAVER_DOWNLOAD_UNKNOWN_ERROR", f"예외 발생: {str(e)}"
-            
+            err_msg = str(e)
+            print(f"오류 발생: {err_msg}")
+            # 브라우저 실행 오류 감지 시 잠금 파일 정리 후 1회 자동 재시도
+            if not _retried and "Target page, context or browser has been closed" in err_msg:
+                print("[*] 브라우저 실행 오류 - 잠금 파일 정리 후 재시도합니다...")
+                _delete_browser_profile_lock(os.getenv("BROWSER_PROFILE_DIR", "browser_profile"))
+                return download_report(account_id, report_name, headless, _retried=True)
+            return None, "NAVER_DOWNLOAD_UNKNOWN_ERROR", f"예외 발생: {err_msg}"
+
         finally:
             print("[*] 브라우저를 닫습니다...")
             if 'browser' in locals() and browser:
