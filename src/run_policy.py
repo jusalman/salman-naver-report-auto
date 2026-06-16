@@ -94,17 +94,20 @@ def get_today_execution_plan(active_accounts: pd.DataFrame, config_reports: pd.D
     # 요일 계산 (0: 월요일, 1: 화요일, ..., 6: 일요일)
     day_of_week = target_date.weekday()
     is_monday = (day_of_week == 0)
+    is_weekday = (day_of_week < 5)  # 월(0)~금(4)
 
     logger.info(f"Generating execution plan for date: {target_date} (Monday: {is_monday})")
 
     # 1. 전역 리포트 설정 필터링 (실행여부 == TRUE)
     active_reports = config_reports[config_reports["실행여부"].astype(str).str.strip().str.upper() == 'TRUE'].copy()
-    
+
     # 2. 실행 주기 필터링
+    # 위클리 보고서는 월요일 고정이 아닌 주중(월~금) 어느 날이든 실행 허용.
+    # 중복 방지는 report_writer의 key 기반 중복 체크가 처리하므로 안전.
     def should_run_by_schedule(schedule):
         if schedule == SCHEDULE_DAILY:
             return True
-        if schedule == SCHEDULE_WEEKLY_MONDAY and is_monday:
+        if schedule == SCHEDULE_WEEKLY_MONDAY and is_weekday:
             return True
         return False
 
